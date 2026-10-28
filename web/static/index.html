@@ -14,6 +14,8 @@
 
 <main>
 
+  <div id="storageWarn" class="warn" hidden></div>
+
   <section class="card">
     <h2>账号</h2>
     <div class="row">
@@ -217,7 +219,10 @@
   </section>
 
   <section class="card">
-    <h2>日志 <button id="btnClearLog" class="ghost small">清空</button></h2>
+    <h2>日志
+      <button id="btnExportLog" class="ghost small">导出 .txt</button>
+      <button id="btnClearLog" class="ghost small">清空</button>
+    </h2>
     <pre id="log" class="log"></pre>
   </section>
 

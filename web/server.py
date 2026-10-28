@@ -79,9 +79,41 @@ import offline_play as m  # noqa: E402
 import zhaohe_protocol as P  # noqa: E402
 
 # ── 数据目录 ──
-# 默认就是项目根目录；部署到 Render/PaaS 且挂了持久盘时，设 ZHAOHE_DATA_DIR=/var/data。
-# 账号池与凭证目录都跟着它走，代码里不要再直接拼 ROOT/accounts。
-DATA_DIR = os.path.abspath(os.environ.get("ZHAOHE_DATA_DIR") or ROOT)
+# 账号池与凭证目录都跟着 DATA_DIR 走，代码里不要再直接拼 ROOT/accounts。
+# 解析顺序：ZHAOHE_DATA_DIR → 自动探测已挂载的持久盘（/var/data、/data、/mnt/data）→ 项目根目录
+def _resolve_data_dir():
+    env = (os.environ.get("ZHAOHE_DATA_DIR") or "").strip()
+    if env:
+        return os.path.abspath(os.path.expanduser(env)), "env"
+    for cand in ("/var/data", "/data", "/mnt/data"):
+        try:
+            if os.path.isdir(cand) and os.path.ismount(cand) and os.access(cand, os.W_OK):
+                return cand, "mount"
+        except OSError:
+            continue
+    return ROOT, "default"
+
+
+DATA_DIR, DATA_DIR_SOURCE = _resolve_data_dir()
+
+
+def data_persistent():
+    """数据目录是否「重启/重新部署后还在」。
+
+    · 本地/自建服务器：会持久化
+    · 托管平台（Render 设了 RENDER=true）：只有挂了磁盘（挂载点）才持久化，
+      否则是临时容器文件系统，重新部署或休眠唤醒后账号数据会丢
+    """
+    try:
+        if os.path.ismount(DATA_DIR):
+            return True
+    except OSError:
+        pass
+    if os.environ.get("RENDER") or os.environ.get("DYNO") or os.environ.get("FLY_APP_NAME"):
+        return False
+    return True
+
+
 ACCOUNTS_DIR = os.path.join(DATA_DIR, "accounts")
 try:
     os.makedirs(ACCOUNTS_DIR, exist_ok=True)
@@ -140,11 +172,49 @@ def rel(path):
         return path
 
 
-def _append_op(uid, action, ok, text):
+def _append_op(uid, action, ok, text, tag=None):
     """操作日志只放内存（账号数据只落 accounts.json 一个文件）。"""
     LOG_RING.append({"time": now_str(), "uid": uid, "action": action,
-                     "ok": ok, "log": text})
+                     "ok": ok, "log": text, "tag": tag})
     del LOG_RING[:-MAX_RING]
+
+
+def _append_health(ip, path, ua=None):
+    """记录一次 /health 访问。
+
+    ★ 探活频率很高（平台每 30s 一次），连续同一来源的请求合并为一条并累计次数，
+      否则 300 条的日志环会被它刷满、真实操作全被挤掉。
+    """
+    now = now_str()
+    text = f"健康检查 {ip}{' | ' + ua[:60] if ua else ''}"
+    if LOG_RING:
+        last = LOG_RING[-1]
+        if last.get("tag") == "health" and last.get("action") == path \
+                and last.get("uid") is None:
+            last["n"] = int(last.get("n") or 1) + 1
+            last["time"] = now
+            last["log"] = f"{text}（连续 {last['n']} 次）"
+            return
+    LOG_RING.append({"time": now, "uid": None, "action": path, "ok": True,
+                     "log": text, "tag": "health", "n": 1})
+    del LOG_RING[:-MAX_RING]
+
+
+def logs_as_text(uid=None):
+    """把内存日志导出成纯文本。"""
+    rows = LOG_RING
+    if uid:
+        rows = [r for r in rows if str(r.get("uid")) == str(uid)]
+    out = [f"# 日志导出 {now_str()}  共 {len(rows)} 条", ""]
+    for r in rows:
+        who = f" uid={r.get('uid')}" if r.get("uid") else ""
+        n = f" ×{r['n']}" if r.get("n") else ""
+        out.append(f"[{r.get('time')}] {r.get('action')} "
+                   f"{'OK' if r.get('ok') else 'FAIL'}{who}{n}")
+        for line in str(r.get("log") or "").splitlines():
+            out.append(f"    {line}")
+        out.append("")
+    return "\n".join(out)
 
 
 def run_logged(uid, action, fn):
@@ -161,7 +231,9 @@ def run_logged(uid, action, fn):
             if not isinstance(e, (RuntimeError, ValueError)):
                 buf.write("\n" + traceback.format_exc())
     text = buf.getvalue().rstrip()
-    _append_op(uid, action, ok, text)
+    # 只读轮询类接口不进日志，否则会把自己刷满
+    if action not in ("/api/logs", "/api/state", "/api/account/files"):
+        _append_op(uid, action, ok, text)
     return {"ok": ok, "data": data, "logs": text.splitlines(), "error": err}
 
 
@@ -246,6 +318,9 @@ def api_state(_body=None):
                   "accounts": rel(ACCOUNTS_DIR),
                   "data_dir": rel(DATA_DIR),
                   "account_file": rel(m.ACCOUNT_FILE)},
+        "storage": {"dir": rel(DATA_DIR), "source": DATA_DIR_SOURCE,
+                    "persistent": data_persistent(),
+                    "account_file_exists": os.path.exists(m.ACCOUNT_FILE)},
     }
 
 
@@ -1321,11 +1396,31 @@ class Handler(BaseHTTPRequestHandler):
         path, query = parsed.path, parse_qs(parsed.query)
 
         if path in ("/health", "/healthz"):
-            # 健康检查（免鉴权）：只回 {"status": "ok"}
+            # 健康检查（免鉴权）：只回 {"status": "ok"}，同时记进底部日志
+            _append_health(self.client_address[0], path,
+                           self.headers.get("User-Agent"))
             self._send_json({"status": "ok"})
             return
 
         if not self._require_auth():
+            return
+
+        if path == "/api/logs/export":
+            try:
+                uid = (query.get("uid") or [None])[0]
+                blob = logs_as_text(uid).encode("utf-8")
+                name = f"logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                print(f"[logs] 导出日志 {name}（{len(blob)} 字节）")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Disposition",
+                                 f'attachment; filename="{name}"')
+                self.send_header("Content-Length", str(len(blob)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(blob)
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, 400)
             return
 
         if path == "/api/accounts/export":
@@ -1454,7 +1549,10 @@ def main():
     print("  zhaohe 脱机工具 Web 服务")
     print(f"  http://127.0.0.1:{args.port}")
     print(f"  项目目录: {ROOT}")
-    print(f"  数据目录: {rel(DATA_DIR)}")
+    print(f"  数据目录: {rel(DATA_DIR)}  （来源: {DATA_DIR_SOURCE}）")
+    if not data_persistent():
+        print("  ⚠ 该目录【不可持久化】：重新部署/休眠唤醒后账号数据会丢失。")
+        print("    解决：在平台挂一个持久磁盘并设 ZHAOHE_DATA_DIR 指向挂载点（如 /var/data）。")
     print(f"  账号文件: {rel(m.ACCOUNT_FILE)}")
     print(f"  内嵌模板: 内存 {TEMPLATE_SIZE} 字节（不落盘）")
     print(f"  访问认证: {'已开启 Basic Auth' if auth_spec() else '未开启（仅建议内网/本机使用）'}")

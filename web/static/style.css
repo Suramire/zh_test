@@ -202,3 +202,19 @@ td .tag.top { color: #ffcf40; border-color: #6b5510; }
   main { padding: 12px 10px 40px; }
   .card { padding: 14px; }
 }
+
+.warn {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid #d9534f55;
+  background: #d9534f18;
+  color: #b5372f;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.warn code {
+  background: #d9534f22;
+  padding: 1px 5px;
+  border-radius: 4px;
+}

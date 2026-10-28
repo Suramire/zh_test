@@ -30,7 +30,7 @@ function setBusy(on) {
   busyCount += on ? 1 : -1;
   if (busyCount < 0) busyCount = 0;
   document.querySelectorAll("button").forEach((b) => {
-    if (b.id === "btnClearLog") return;
+    if (b.id === "btnClearLog" || b.id === "btnExportLog") return;
     b.disabled = busyCount > 0;
   });
 }
@@ -78,6 +78,7 @@ async function refresh() {
   renderCurrent(st.current);
   renderAccounts(st.accounts);
   renderTemplate(st.template);
+  renderStorage(st.storage);
   if (st.current) await loadFiles(st.current.uid);
 }
 
@@ -119,6 +120,24 @@ function renderAccounts(list) {
   $("accountInfo").textContent = cur
     ? `账号文件：${af}（current=${cur.uid}）　创建：${cur.createdAt || "-"}　更新：${cur.updated || "-"}　存档目录：accounts/${cur.uid}/`
     : `账号文件：${af}（还没有账号）`;
+}
+
+function renderStorage(st) {
+  const el = $("storageWarn");
+  if (!el) return;
+  if (!st) {
+    el.hidden = true;
+    return;
+  }
+  if (st.persistent) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML =
+    `⚠ 数据目录 <b>${esc(st.dir)}</b> 不是持久盘：平台重新部署或休眠唤醒后，` +
+    `导入的账号会丢失。<br>解决办法：给服务挂一个持久磁盘，并把环境变量 ` +
+    `<code>ZHAOHE_DATA_DIR</code> 指向挂载点（如 <code>/var/data</code>）。`;
 }
 
 function renderTemplate(t) {
@@ -492,6 +511,14 @@ function bind() {
       `正在生成第 ${chapter} 章存档${sw ? "（功能全开）" : ""}，稍后自动下载 zip ...`;
     toast("开始生成并下载", "ok");
     downloadFile(url);
+  };
+
+  $("btnExportLog").onclick = () => {
+    const params = new URLSearchParams();
+    if (STATE.current && STATE.current.uid) params.set("uid", STATE.current.uid);
+    params.set("_", Date.now());
+    downloadFile(`/api/logs/export?${params.toString()}`);
+    toast("正在导出日志", "ok");
   };
 
   $("btnClearLog").onclick = () => ($("log").textContent = "");
