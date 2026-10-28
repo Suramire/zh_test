@@ -1,0 +1,13 @@
+# 账号数据绝不进仓库（含明文密码）
+accounts.json
+accounts/
+offline_account.json
+
+# 运行时杂物
+__pycache__/
+*.py[cod]
+*.pyo
+.DS_Store
+
+# 部署产物
+dist/

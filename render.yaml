@@ -1,0 +1,43 @@
+# Render Blueprint —— 配合 GitHub 仓库一键部署
+#
+# 用法：
+#   1) 本地打包出一个干净的仓库目录（package.sh 会把本文件放到仓库根）：
+#        ./web/deploy/package.sh
+#        cd dist && tar -xzf zhaohe-web_*.tar.gz && cd zhaohe-web_*
+#        git init && git add -A && git commit -m init
+#        git remote add origin git@github.com:<你>/zhaohe-web.git && git push -u origin main
+#   2) Render 控制台 → New + → Blueprint → 选这个仓库 → Apply
+#   3) 部署完在服务的 Environment 里填 ZHAOHE_AUTH（账号:密码）
+#
+# ★ 数据持久化：账号池 accounts.json 与 accounts/ 必须落在持久盘上，
+#   Render 的持久盘只在 paid plan（starter 及以上）可用。
+#   想先用免费版试：把下面 disk 段删掉，并把 ZHAOHE_DATA_DIR 改成 /tmp/zhaohe
+#   —— 但每次重新部署/休眠唤醒后账号数据都会丢。
+services:
+  - type: web
+    name: zhaohe-web
+    runtime: python
+    plan: starter
+    region: singapore          # 可选：singapore / oregon / frankfurt / ohio / virginia
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 web/server.py --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PYTHONDONTWRITEBYTECODE
+        value: "1"
+      - key: TZ
+        value: Asia/Shanghai
+      # 数据目录，必须与下面 disk.mountPath 一致
+      - key: ZHAOHE_DATA_DIR
+        value: /var/data
+      # 访问密码 user:pass（sync:false = 不在仓库里写值，去 Render 控制台填）
+      - key: ZHAOHE_AUTH
+        sync: false
+    disk:
+      name: zhaohe-data
+      mountPath: /var/data
+      sizeGB: 1

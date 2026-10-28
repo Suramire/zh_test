@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zhaohe 脱机控制台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>zhaohe 脱机控制台</h1>
+  <div class="current" id="currentAccount">加载中…</div>
+</header>
+
+<main>
+
+  <section class="card">
+    <h2>账号</h2>
+    <div class="row">
+      <select id="accountSelect"></select>
+      <button id="btnSelect">切换</button>
+      <button id="btnLogin" class="ghost">重新登录</button>
+      <button id="btnRegister" class="primary">新建账号</button>
+      <button id="btnRefresh" class="ghost">刷新</button>
+    </div>
+    <div id="accountInfo" class="muted"></div>
+
+    <details>
+      <summary>导入已有账号</summary>
+      <div class="grid">
+        <input id="impUser" placeholder="userName">
+        <input id="impPass" placeholder="passwd">
+        <input id="impNick" placeholder="nickName（可空）">
+        <input id="impUid" placeholder="uid（可空，留空自动登录获取）">
+        <button id="btnImport">导入</button>
+      </div>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>修改昵称</h2>
+    <div class="row">
+      <input id="nickInput" class="wide" placeholder="输入新昵称（服务端会自动加 0000_izhaohe_ 前缀）">
+      <button id="btnNickManual" class="primary">修改昵称</button>
+      <button id="btnNickAuto">自动生成</button>
+    </div>
+    <div class="row">
+      <span id="nickInfo" class="muted">自动生成 = 从榜单里取一个别人的昵称底名 + 随机数字</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>玩家等级</h2>
+    <div class="row">
+      <input id="levelInput" type="number" min="1" value="32" class="narrow" placeholder="目标等级">
+      <button id="btnSetLevel" class="primary">写入等级</button>
+    </div>
+    <div class="row">
+      <span id="levelInfo" class="muted">协议 60 ChangeValues：key1 = "等级_0000"，其余字段按真机样本固定</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>竞技场 · 刷新排行榜分数</h2>
+    <div class="row">
+      <select id="arenaMatchMode">
+        <option value="sync" selected>用存档积分（推荐）</option>
+        <option value="add">在存档基础上加 N 分</option>
+        <option value="absolute">指定绝对值（会覆盖服务端）</option>
+      </select>
+      <input id="arenaMatchScore" type="number" placeholder="数值" class="narrow">
+      <input id="arenaMatchWait" type="number" min="0" max="30" value="5" class="narrow" title="进入队列后轮询多少秒再取消">
+      <label class="muted"><input id="arenaMatchKeep" type="checkbox"> 不取消</label>
+      <button id="btnArenaMatch" class="primary">匹配→取消 推分</button>
+      <button id="btnArenaRank">查榜</button>
+    </div>
+    <div class="row">
+      <span id="arenaMatchInfo" class="muted">CMD25 匹配（score=GameData.playerScore）→ CMD38 轮询 → CMD26 取消。★ 填的数字是<b>绝对值</b>，会把服务端积分直接改成这个数（填小数字会掉榜）</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>竞技场 · 战报上报（不改积分）</h2>
+    <div class="row">
+      <input id="arenaScore" type="number" min="1" placeholder="要加的积分，如 25" class="narrow">
+      <select id="arenaWin">
+        <option value="1" selected>赢（iswin=1）</option>
+        <option value="0">输（iswin=0）</option>
+      </select>
+      <button id="btnArenaScore" class="primary">结算加分</button>
+    </div>
+    <div class="row">
+      <span id="arenaInfo" class="muted">协议 29 DuizhanoverCode：只上报战报，服务端不改积分 —— 要改积分请用上面的「匹配→取消 推分」</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>账号列表 导入 / 导出</h2>
+    <div class="row">
+      <button id="btnExportJson">导出 JSON</button>
+      <button id="btnExportCsv" class="ghost">导出 CSV</button>
+      <span class="muted">JSON 含明文密码（可再导入）；CSV 带 BOM，可直接用 Excel 打开</span>
+    </div>
+    <div class="row">
+      <input type="file" id="impListFile" accept=".json,application/json">
+      <label class="chk"><input type="checkbox" id="impSelectChk"> 导入后设为当前账号</label>
+      <button id="btnImportList" class="primary">导入账号列表</button>
+    </div>
+    <div class="row">
+      <textarea id="impListText" rows="4" placeholder="或直接粘贴 JSON：导出文件 / accounts 数组 / 单个账号"></textarea>
+    </div>
+    <div id="impListInfo" class="muted"></div>
+  </section>
+
+  <section class="card">
+    <h2>排行榜</h2>
+    <div class="row">
+      <button id="btnRankQuery">查询榜单</button>
+      <button id="btnJump" class="primary">一键 jump 冲榜</button>
+      <span class="muted">jump = 榜一分数 ÷100 +1，再 ×100 上报；榜一是自己则跳过</span>
+    </div>
+    <div class="row"><span id="rankDeadline" class="muted"></span></div>
+    <div class="grid two">
+      <div class="rank-box" id="rankTop0"><span class="muted">尚未查询</span></div>
+      <div class="rank-box" id="rankTop1"><span class="muted">尚未查询</span></div>
+    </div>
+    <div class="table-wrap">
+      <table id="rankTable">
+        <thead>
+          <tr><th>榜</th><th>名次</th><th>玩家</th><th>uid</th><th>分数</th><th>本人</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>世界魔王 · 伤害上报</h2>
+    <div class="row">
+      <input id="wbDamage" type="number" min="1" placeholder="伤害值，如 10000000" class="wide">
+      <button id="btnWbUpload" class="primary">上报伤害</button>
+      <button id="btnWbStatus">查询状态</button>
+    </div>
+    <div class="row">
+      <label class="chk">英雄 kind <input id="wbKind" type="number" value="2000" class="narrow"></label>
+      <label class="chk">怪物 kind <input id="wbMonster" type="number" value="297" class="narrow"></label>
+      <label class="chk"><input type="checkbox" id="wbCounterChk"> 先发 146 计数</label>
+      <input id="wbCounterValue" placeholder="146 value（默认 1）" class="narrow">
+    </div>
+    <div class="row">
+      <textarea id="wbData" rows="2" placeholder="data hex（留空 = 使用内置真机日志样本 343B）"></textarea>
+    </div>
+    <div class="row"><span id="wbInfo" class="muted">协议 170；每期最多 8 次；data 留空时自动带内置样本</span></div>
+    <div class="row"><span id="wbStatus" class="muted">点「查询状态」查看本期累计伤害 / 战斗次数 / 排名（不消耗次数）</span></div>
+  </section>
+
+  <section class="card">
+    <h2>世界魔王 · 排行榜</h2>
+    <div class="row">
+      <select id="wbRankType">
+        <option value="0" selected>本期伤害榜</option>
+        <option value="1">上期伤害榜</option>
+        <option value="2">代币总榜</option>
+        <option value="3">代币月榜</option>
+        <option value="4">月伤害榜</option>
+        <option value="5">总伤害榜</option>
+      </select>
+      <button id="btnWbRank" class="primary">查询排行</button>
+    </div>
+    <div class="row"><span id="wbRankInfo" class="muted">协议 176；只读，不消耗次数</span></div>
+    <div class="table-wrap">
+      <table id="wbRankTable">
+        <thead>
+          <tr><th>排名</th><th>昵称</th><th>UID</th><th>伤害</th><th>等级</th><th>点赞</th><th>公开</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>上报分数</h2>
+    <div class="row">
+      <input id="score" type="number" min="1" placeholder="分数，如 62" class="narrow">
+      <select id="rankType">
+        <option value="0">大选关榜 type=0</option>
+        <option value="1">爬塔榜 type=1</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="renameChk" checked> 自动改昵称</label>
+      <label class="chk"><input type="checkbox" id="verifyChk" checked> 回查结果</label>
+      <button id="btnUpload" class="primary">上报（×100）</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>存档导出</h2>
+    <div class="row">
+      <label class="chk">章节 <input id="chapter" type="number" min="1" value="10" class="narrow"></label>
+      <label class="chk"><input type="checkbox" id="switchesChk" checked> 打开功能开关</label>
+      <button id="btnExportSave" class="primary">导出下载 soco.bin + NetData.bin</button>
+    </div>
+    <div class="row">
+      <span id="tplInfo" class="muted"></span>
+    </div>
+    <div class="row">
+      <span id="exportInfo" class="muted">现生成 → 打包 zip → 浏览器下载（不写任何本地目录，可直接部署到服务器）</span>
+    </div>
+    <div class="row">
+      <span class="muted">下面是服务端 accounts/&lt;uid&gt;/ 里的凭证文件（NetData.bin 等）；soco.bin 不再落盘，走上面的导出下载。</span>
+    </div>
+    <div class="table-wrap">
+      <table id="fileTable">
+        <thead><tr><th>文件</th><th>大小</th><th>修改时间</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>日志 <button id="btnClearLog" class="ghost small">清空</button></h2>
+    <pre id="log" class="log"></pre>
+  </section>
+
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

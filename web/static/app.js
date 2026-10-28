@@ -1,0 +1,523 @@
+const $ = (id) => document.getElementById(id);
+
+let STATE = { accounts: [], current: null };
+
+// ───────────── 基础 ─────────────
+async function api(path, method = "GET", body = null) {
+  const opt = { method, headers: {} };
+  if (body !== null) {
+    opt.headers["Content-Type"] = "application/json";
+    opt.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opt);
+  let data;
+  try {
+    data = await res.json();
+  } catch (e) {
+    throw new Error(`HTTP ${res.status}：返回不是 JSON`);
+  }
+  if (!data.ok) {
+    const err = data.error || "未知错误";
+    if (data.logs && data.logs.length) appendLog(data.logs, false);
+    throw new Error(err);
+  }
+  if (data.logs && data.logs.length) appendLog(data.logs, true);
+  return data.data;
+}
+
+let busyCount = 0;
+function setBusy(on) {
+  busyCount += on ? 1 : -1;
+  if (busyCount < 0) busyCount = 0;
+  document.querySelectorAll("button").forEach((b) => {
+    if (b.id === "btnClearLog") return;
+    b.disabled = busyCount > 0;
+  });
+}
+
+async function act(label, fn) {
+  setBusy(true);
+  try {
+    const out = await fn();
+    toast(`${label} 完成`, "ok");
+    return out;
+  } catch (e) {
+    appendLog([`✗ ${label} 失败：${e.message}`], false);
+    toast(`${label} 失败：${e.message}`, "bad");
+    return null;
+  } finally {
+    setBusy(false);
+  }
+}
+
+function toast(msg, kind = "") {
+  let el = document.querySelector(".toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "toast";
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.className = `toast show ${kind}`;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => (el.className = "toast"), 3200);
+}
+
+function appendLog(lines, ok = true) {
+  const el = $("log");
+  const text = lines.join("\n");
+  const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  el.textContent += (el.textContent ? "\n" : "") + text;
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+
+// ───────────── 账号 ─────────────
+async function refresh() {
+  const st = await api("/api/state");
+  STATE = st;
+  renderCurrent(st.current);
+  renderAccounts(st.accounts);
+  renderTemplate(st.template);
+  if (st.current) await loadFiles(st.current.uid);
+}
+
+function renderCurrent(cur) {
+  const el = $("currentAccount");
+  if (!cur) {
+    el.innerHTML = "尚未选择账号";
+    return;
+  }
+  el.innerHTML =
+    `<b>${esc(cur.nickName || "-")}</b>` +
+    ` · uid=${cur.uid} · ${esc(cur.userName || "")}` +
+    (cur.playerLevel ? ` · Lv.${cur.playerLevel}` : "") +
+    (cur.sid ? ` · sid=${cur.sid}` : "");
+  $("nickInput").placeholder =
+    `输入新昵称（当前：${cur.nickName || "-"}，服务端会自动加 0000_izhaohe_ 前缀）`;
+  if (cur.playerLevel) $("levelInput").value = cur.playerLevel;
+}
+
+function renderAccounts(list) {
+  const sel = $("accountSelect");
+  sel.innerHTML = "";
+  if (!list.length) {
+    const o = document.createElement("option");
+    o.textContent = "（账号文件里还没有账号）";
+    o.value = "";
+    sel.appendChild(o);
+    return;
+  }
+  for (const a of list) {
+    const o = document.createElement("option");
+    o.value = a.uid;
+    o.textContent = `${a.current ? "★ " : ""}${a.nickName || "-"} · ${a.uid}`;
+    if (a.current) o.selected = true;
+    sel.appendChild(o);
+  }
+  const cur = list.find((a) => a.current);
+  const af = (STATE.paths && STATE.paths.account_file) || "accounts.json";
+  $("accountInfo").textContent = cur
+    ? `账号文件：${af}（current=${cur.uid}）　创建：${cur.createdAt || "-"}　更新：${cur.updated || "-"}　存档目录：accounts/${cur.uid}/`
+    : `账号文件：${af}（还没有账号）`;
+}
+
+function renderTemplate(t) {
+  if (!t) return;
+  $("tplInfo").textContent = t.embedded
+    ? `存档模板：后端内嵌 ${fmtSize(t.size)}（${t.path}），无需上传`
+    : `当前模板：${t.path}`;
+}
+
+async function loadFiles(uid) {
+  try {
+    const r = await api(`/api/account/files?uid=${encodeURIComponent(uid)}`);
+    renderFiles(r);
+  } catch (e) {
+    renderFiles({ files: [] });
+  }
+}
+
+function renderFiles(r) {
+  const tb = $("fileTable").querySelector("tbody");
+  tb.innerHTML = "";
+  if (!r.files || !r.files.length) {
+    tb.innerHTML = `<tr><td colspan="4" class="muted">该账号目录暂无文件</td></tr>`;
+    return;
+  }
+  for (const f of r.files) {
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${esc(f.name)}</td>` +
+      `<td>${fmtSize(f.size)}</td>` +
+      `<td>${esc(f.mtime)}</td>` +
+      `<td><a href="/api/account/file?uid=${encodeURIComponent(r.uid)}&name=${encodeURIComponent(f.name)}">下载</a></td>`;
+    tb.appendChild(tr);
+  }
+}
+
+function fmtSize(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+// ───────────── 排行榜 ─────────────
+function renderRank(data) {
+  const labels = { 0: "大选关榜", 1: "爬塔榜" };
+  const endText = data.info && data.info.end_time_text;
+  $("rankDeadline").textContent = endText
+    ? `榜单截止时间：${endText}`
+    : "";
+  for (const t of [0, 1]) {
+    const box = $(`rankTop${t}`);
+    const top = data.tops && data.tops[String(t)];
+    if (!top) {
+      box.innerHTML = `<div class="title">${labels[t]} · type=${t}</div>
+        <div class="line">榜上暂无数据</div>`;
+      continue;
+    }
+    const isMe = data.account && Number(top.uid) === Number(data.account.uid);
+    const isTop = Number(top.rank) === 1;
+    box.innerHTML = `
+      <div class="title">${labels[t]} · type=${t}</div>
+      <div class="name">${esc(top.name)}</div>
+      <div class="line">uid：${top.uid}</div>
+      <div class="line">分数：<b>${top.value}</b>　名次：${isTop ? "rank=1" : `<span class="warn">rank=${top.rank}（未取到榜一）</span>`}</div>
+      <div class="line">${isMe ? "★ 这是我" : "不是我"}</div>`;
+  }
+
+  const tb = $("rankTable").querySelector("tbody");
+  tb.innerHTML = "";
+  const entries = data.entries || [];
+  if (!entries.length) {
+    tb.innerHTML = `<tr><td colspan="6" class="muted">无数据</td></tr>`;
+    return;
+  }
+  const myUid = data.account ? Number(data.account.uid) : null;
+  for (const e of entries) {
+    const tr = document.createElement("tr");
+    const me = Number(e.uid) === myUid;
+    const topTag = Number(e.rank) === 1 ? `<span class="tag top">榜一</span>` : "";
+    tr.innerHTML =
+      `<td>${labels[e.type] || e.type}</td>` +
+      `<td>${e.rank}</td>` +
+      `<td>${esc(e.name)} ${topTag}</td>` +
+      `<td>${e.uid}</td>` +
+      `<td>${e.value}</td>` +
+      `<td class="${me ? "me" : ""}">${me ? "★ 本人" : ""}</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+// ───────────── 事件绑定 ─────────────
+function bind() {
+  $("btnRefresh").onclick = () => act("刷新", refresh);
+
+  $("btnSelect").onclick = async () => {
+    const uid = $("accountSelect").value;
+    if (!uid) return toast("请选择账号", "bad");
+    const out = await act("切换账号", () => api("/api/account/select", "POST", { uid }));
+    if (out) {
+      await refresh();
+      await loadFiles(out.current.uid);
+    }
+  };
+
+  $("btnLogin").onclick = async () => {
+    const out = await act("重新登录", () => api("/api/account/login", "POST", {}));
+    if (out) await refresh();
+  };
+
+  $("btnRegister").onclick = async () => {
+    if (!confirm("新建账号会注册新号、写入账号池并切换为当前账号，继续？")) return;
+    const out = await act("新建账号", () => api("/api/account/register", "POST", {}));
+    if (out) await refresh();
+  };
+
+  $("btnImport").onclick = async () => {
+    const body = {
+      userName: $("impUser").value.trim(),
+      passwd: $("impPass").value.trim(),
+      nickName: $("impNick").value.trim(),
+      uid: $("impUid").value.trim() || null,
+    };
+    if (!body.userName || !body.passwd) return toast("请填 userName 和 passwd", "bad");
+    const out = await act("导入账号", () => api("/api/account/import", "POST", body));
+    if (out) await refresh();
+  };
+
+  $("btnNickManual").onclick = async () => {
+    const name = $("nickInput").value.trim();
+    if (!name) return toast("请输入新昵称，或点「自动生成」", "bad");
+    const out = await act("修改昵称", () =>
+      api("/api/account/nickname", "POST", { mode: "manual", nickName: name }));
+    if (out) {
+      $("nickInfo").textContent = `已改为：${out.nickName}`;
+      $("nickInput").value = "";
+      await refresh();
+    }
+  };
+
+  $("btnNickAuto").onclick = async () => {
+    if (!confirm("将从榜单里挑一个底名并自动加随机数字改名，继续？")) return;
+    const out = await act("自动生成昵称", () =>
+      api("/api/account/nickname", "POST", { mode: "auto" }));
+    if (out) {
+      $("nickInfo").textContent = `已改为：${out.nickName}`;
+      await refresh();
+    }
+  };
+
+  $("btnSetLevel").onclick = async () => {
+    const level = parseInt($("levelInput").value, 10);
+    if (!level || level <= 0) return toast("请填一个正整数等级", "bad");
+    if (!confirm(`把玩家等级写为 ${level} 级？`)) return;
+    const out = await act("写入玩家等级", () =>
+      api("/api/account/level", "POST", { level }));
+    if (out) {
+      $("levelInfo").textContent =
+        `已写入等级 ${out.level}（result=${out.result}）`;
+      await refresh();
+    }
+  };
+
+  $("btnArenaMatch").onclick = async () => {
+    const mode = $("arenaMatchMode").value;
+    const raw = $("arenaMatchScore").value.trim();
+    const wait = parseInt($("arenaMatchWait").value, 10) || 0;
+    const keep = $("arenaMatchKeep").checked;
+    const body = { wait, keep };
+
+    let desc;
+    if (mode === "add") {
+      if (raw === "") return toast("加分模式请填增量，如 25", "bad");
+      body.mode = "add";
+      body.score = parseInt(raw, 10);
+      desc = `在存档积分上加 ${body.score} 分`;
+    } else if (mode === "absolute") {
+      if (raw === "") return toast("绝对值模式请填分数", "bad");
+      body.mode = "absolute";
+      body.score = parseInt(raw, 10);
+      desc = `把服务端积分直接改成 ${body.score}（低于存档会掉榜）`;
+    } else {
+      desc = "用存档里的积分同步到服务端";
+    }
+
+    if (!confirm(`将${desc}；匹配 ${wait} 秒后${keep ? "保留队列" : "取消"}。继续？`)) return;
+    const out = await act("匹配推分", () => api("/api/arena/match", "POST", body));
+    if (out) {
+      const rk = out.rank || {};
+      const server = out.server_score != null ? out.server_score
+        : (rk.mine ? rk.mine.score : "不在前 100");
+      const season = out.season || {};
+      const seasonTxt = season.ok
+        ? `　<b>赛季剩余 ${season.season_left_text}</b>（到 ${season.season_end_text}）`
+        : "";
+      $("arenaMatchInfo").innerHTML =
+        `推送 score=<b>${out.score}</b>（${out.mode === "add" ? "加分" : "绝对值"}）` +
+        `　匹配倒计时=${out.match && out.match.result != null ? out.match.result : "?"}s` +
+        `　取消=${out.cancel ? (out.cancel.ok ? "成功" : "失败") : "未取消"}` +
+        `　服务端积分=<b>${server}</b>` +
+        `　我的名次=${out.my_rank != null ? out.my_rank : (rk.my_rank ?? "?")}` +
+        (out.save_score != null ? `　存档积分=${out.save_score}` : "") +
+        seasonTxt;
+      await refresh();
+    }
+  };
+
+  $("btnArenaRank").onclick = async () => {
+    const out = await act("查竞技场榜", () => api("/api/arena/rank", "POST", {}));
+    if (out) {
+      const mine = out.mine ? out.mine.score : "不在前 100";
+      const top = (out.top || [])
+        .map((r) => `#${r.rank} ${r.name} ${r.score}`).join("　");
+      const season = out.season || {};
+      const seasonTxt = season.ok
+        ? `　<b>赛季结束=${season.season_end_text}</b>（剩 ${season.season_left_text}）` +
+          `　今日开放 ${season.today_open_text} ~ ${season.today_close_text}`
+        : "";
+      $("arenaMatchInfo").innerHTML =
+        `我的名次=${out.my_rank}　服务端积分=${mine}` +
+        (out.save_score != null ? `　存档积分=${out.save_score}` : "") +
+        seasonTxt + `　${top}`;
+    }
+  };
+
+  $("btnArenaScore").onclick = async () => {
+    const score = parseInt($("arenaScore").value, 10);
+    if (!score || score <= 0) return toast("请填一个正整数积分", "bad");
+    const is_win = parseInt($("arenaWin").value, 10);
+    if (!confirm(`竞技场结算：${is_win ? "赢" : "输"} +${score} 分，继续？`)) return;
+    const out = await act("竞技场加分", () =>
+      api("/api/arena/score", "POST", { score, is_win }));
+    if (out) {
+      $("arenaInfo").textContent =
+        `结算成功：iswin=${out.is_win}　addScore=${out.add_score}` +
+        `　result=${out.result}　score=${out.score}`;
+    }
+  };
+
+  $("btnExportJson").onclick = () => downloadFile("/api/accounts/export?format=json");
+  $("btnExportCsv").onclick = () => downloadFile("/api/accounts/export?format=csv");
+
+  $("btnImportList").onclick = async () => {
+    const file = $("impListFile").files[0];
+    let text = $("impListText").value.trim();
+    if (file) text = await file.text();
+    if (!text) return toast("请选择文件或粘贴 JSON", "bad");
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      return toast(`JSON 解析失败：${e.message}`, "bad");
+    }
+    const out = await act("导入账号列表", () =>
+      api("/api/accounts/import", "POST", {
+        data,
+        select: $("impSelectChk").checked,
+      }));
+    if (out) {
+      $("impListInfo").textContent =
+        `新增 ${out.added}，更新 ${out.updated}，跳过 ${out.skipped}，` +
+        `账号总数 ${out.total}` +
+        (out.errors && out.errors.length ? `；问题：${out.errors.join("；")}` : "");
+      $("impListFile").value = "";
+      $("impListText").value = "";
+      await refresh();
+    }
+  };
+
+  $("btnRankQuery").onclick = async () => {
+    const out = await act("查询榜单", () => api("/api/rank/query", "POST", {}));
+    if (out) renderRank(out);
+  };
+
+  $("btnJump").onclick = async () => {
+    if (!confirm("将查询两个榜的榜一，并按（分数÷100+1）×100 分别上报，继续？")) return;
+    const out = await act("jump 冲榜", () => api("/api/rank/jump", "POST", {}));
+    if (out) {
+      renderRank({ tops: out.tops, entries: [], account: out.account, info: out.info });
+      await loadFiles(out.account.uid);
+    }
+  };
+
+  $("btnWbUpload").onclick = async () => {
+    const damage = parseInt($("wbDamage").value, 10);
+    if (!damage || damage <= 0) return toast("请填一个正整数伤害", "bad");
+    if (!confirm(`上报世界魔王伤害 ${damage}，继续？`)) return;
+    const body = {
+      damage,
+      kind: parseInt($("wbKind").value, 10) || 2000,
+      monster: parseInt($("wbMonster").value, 10) || 297,
+      send_counter: $("wbCounterChk").checked,
+      counter_value: $("wbCounterValue").value.trim() || "1",
+    };
+    const dataHex = $("wbData").value.trim();
+    if (dataHex) body.data_hex = dataHex;
+    const out = await act("世界魔王伤害上报", () =>
+      api("/api/worldboss/damage", "POST", body));
+    if (out) {
+      $("wbInfo").textContent =
+        `本次 ${out.damage}　累计伤害 ${out.total_damage}　` +
+        `战斗次数 ${out.fights}（上限 ${out.max_fights}，剩余 ${out.remaining}）` +
+        `　data=${out.data_len}B（${out.data_source}）` +
+        (out.counter ? `　146=${out.counter.value}` : "");
+    }
+  };
+
+  $("btnWbStatus").onclick = async () => {
+    const out = await act("世界魔王状态查询", () =>
+      api("/api/worldboss/status", "POST", {}));
+    if (out) {
+      $("wbStatus").textContent =
+        `累计伤害 ${out.total_damage}　战斗次数 ${out.fights}` +
+        `（上限 ${out.max_fights}，剩余 ${out.remaining}）　排名 ${out.rank}` +
+        `　本期结束 ${out.end_time_text || "未知"}` +
+        `　下期开始 ${out.next_start_text || "未知"}`;
+    }
+  };
+
+  $("btnWbRank").onclick = async () => {
+    const type = parseInt($("wbRankType").value, 10);
+    const out = await act("世界魔王排行榜查询", () =>
+      api("/api/worldboss/rank", "POST", { type }));
+    if (!out) return;
+    $("wbRankInfo").textContent =
+      `${out.type_name}　我的排名 ${out.my_rank || "未上榜"}` +
+      `　我的分数 ${out.my_score}　共 ${out.size} 条`;
+    const tb = $("wbRankTable").querySelector("tbody");
+    tb.innerHTML = "";
+    const entries = out.entries || [];
+    if (!entries.length) {
+      tb.innerHTML = `<tr><td colspan="7" class="muted">无数据</td></tr>`;
+      return;
+    }
+    const myUid = out.account ? Number(out.account.uid) : null;
+    for (const e of entries) {
+      const tr = document.createElement("tr");
+      const me = Number(e.uid) === myUid;
+      const topTag = e.rank === 1 ? ` <span class="tag top">榜一</span>` : "";
+      tr.innerHTML =
+        `<td>${e.rank}</td>` +
+        `<td class="${me ? "me" : ""}">${esc(e.name)}${topTag}${me ? " ★" : ""}</td>` +
+        `<td>${e.uid}</td>` +
+        `<td>${e.damage}</td>` +
+        `<td>${e.level}</td>` +
+        `<td>${e.like}</td>` +
+        `<td>${e.status === 0 ? "公开" : "隐藏"}</td>`;
+      tb.appendChild(tr);
+    }
+  };
+
+  $("btnUpload").onclick = async () => {
+    const score = parseInt($("score").value, 10);
+    if (!score || score <= 0) return toast("请填一个正整数分数", "bad");
+    const body = {
+      score,
+      type: parseInt($("rankType").value, 10),
+      rename: $("renameChk").checked,
+      verify: $("verifyChk").checked,
+    };
+    const out = await act("上报分数", () => api("/api/rank/upload", "POST", body));
+    if (out) await loadFiles(out.account.uid);
+  };
+
+  $("btnExportSave").onclick = () => {
+    const chapter = parseInt($("chapter").value, 10) || 10;
+    const sw = $("switchesChk").checked ? 1 : 0;
+    const uid = (STATE.current && STATE.current.uid) || "";
+    const url = `/api/save/export?chapter=${chapter}&open_switches=${sw}`
+      + (uid ? `&uid=${uid}` : "") + `&_=${Date.now()}`;
+    $("exportInfo").textContent =
+      `正在生成第 ${chapter} 章存档${sw ? "（功能全开）" : ""}，稍后自动下载 zip ...`;
+    toast("开始生成并下载", "ok");
+    downloadFile(url);
+  };
+
+  $("btnClearLog").onclick = () => ($("log").textContent = "");
+}
+
+function downloadFile(url) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+window.addEventListener("DOMContentLoaded", async () => {
+  bind();
+  try {
+    await refresh();
+  } catch (e) {
+    appendLog([`✗ 初始化失败：${e.message}`], false);
+    toast(`初始化失败：${e.message}`, "bad");
+  }
+});

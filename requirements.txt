@@ -1,0 +1,4 @@
+# 本服务只用 Python 标准库，没有任何第三方依赖。
+# 这个文件存在只是为了：
+#   1) 让 Render / Railway / Heroku 之类的平台识别「这是一份 Python 项目」
+#   2) 让平台默认的 `pip install -r requirements.txt` 能正常跑完（空依赖）
