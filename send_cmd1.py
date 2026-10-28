@@ -221,6 +221,13 @@ def send_cmd1(sid, user, passwd, other, lang=0, device=None, s_session_id=0,
 
     (count, length) = struct.unpack_from(">II", data, 0)
     body_resp = data[8:8 + length]
+    # ★ 正常回包 = 1 + 8*3 + 4 个 UTF 串（实测 127B）。只回 25B 时说明服务端只发了
+    #   头部（uid/sid/servertime）就断了 —— 常见于同账号并发登录或服务端抖动，
+    #   直接解下去会抛「unpack_from requires a buffer of at least 27 bytes」，看不懂。
+    if len(body_resp) < 26:
+        raise RuntimeError(
+            f"登录回包异常（半截包）: cmd={body_resp[0] if body_resp else '?'} "
+            f"len={len(body_resp)} raw={data.hex()}")
     off = 1  # 跳过 protocolID
     (uid,) = struct.unpack_from(">Q", body_resp, off); off += 8
     (new_sid,) = struct.unpack_from(">Q", body_resp, off); off += 8

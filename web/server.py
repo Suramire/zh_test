@@ -250,11 +250,27 @@ def require_account():
     return acc
 
 
-def login_current():
-    """用当前账号重新登录，刷新 sid，并回写唯一账号文件。"""
+def login_current(retries=3):
+    """用当前账号重新登录，刷新 sid，并回写唯一账号文件。
+
+    ★ 服务端偶尔会回「半截包」（只有 24B 头，4 个字符串全缺），属于偶发抖动 ——
+      重试即可。但「登录失败: {...}」这种账号类错误不重试，避免连续失败触发风控。
+    """
     acc = require_account()
-    lg = m.login(acc["userName"], acc["passwd"],
-                 acc.get("nickName") or acc["userName"])
+    lg = None
+    for attempt in range(1, retries + 1):
+        try:
+            lg = m.login(acc["userName"], acc["passwd"],
+                         acc.get("nickName") or acc["userName"])
+            break
+        except Exception as e:
+            msg = str(e)
+            transient = "登录回包异常" in msg or "登录异常" in msg
+            if not transient or attempt >= retries:
+                raise
+            wait = 1.2 * attempt
+            print(f"  … 登录异常（第 {attempt}/{retries} 次），{wait:.1f}s 后重试：{msg}")
+            time.sleep(wait)
     uid = int(lg.get("uid") or acc["uid"])
     acc = dict(acc)
     acc.update({"uid": uid, "sid": int(lg["sid"]),
