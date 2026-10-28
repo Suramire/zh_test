@@ -449,7 +449,8 @@ function bind() {
       api("/api/worldboss/status", "POST", {}));
     if (out) {
       $("wbStatus").textContent =
-        `累计伤害 ${out.total_damage}　战斗次数 ${out.fights}` +
+        `状态 ${out.status_text}（status=${out.status}）` +
+        `　累计伤害 ${out.total_damage}　战斗次数 ${out.fights}` +
         `（上限 ${out.max_fights}，剩余 ${out.remaining}）　排名 ${out.rank}` +
         `　本期结束 ${out.end_time_text || "未知"}` +
         `　下期开始 ${out.next_start_text || "未知"}`;

@@ -41,7 +41,8 @@ API
     POST /api/rank/query                查 CMD137 两个榜（自动向上翻窗口到 rank=1）
     POST /api/rank/upload               {score,type,rename,verify} 上报分数
     POST /api/rank/jump                 查榜一 → 分别按（分数÷100+1）×100 上报
-    POST /api/worldboss/damage          {damage,kind,monster,data_hex,send_counter} 世界魔王伤害上报
+    POST /api/worldboss/damage          {damage,kind,monster,data_hex,send_counter,precheck}
+                                        世界魔王伤害上报（默认先查 CMD142 判断本期是否开放）
     POST /api/worldboss/status          世界魔王本期状态（只读）
     POST /api/worldboss/rank            {type} 世界魔王排行榜（CMD176，只读）
     GET  /api/save/export?chapter=&open_switches=&uid=
@@ -1087,8 +1088,36 @@ def api_rank_jump(_body=None):
     }
 
 
+# CMD170 回包 result 对应的客户端文案（取自 core2.dex 的 new_worldboss_tishi1/2）
+#   1/2 → 「魔王已经提前溜了，这次的挑战没有生效」
+#   3   → 「今天的挑战次数用完了哦~休息一下明天再来」
+WORLDBOSS_RESULT_HINT = {
+    1: "魔王已经提前溜了，这次的挑战没有生效",
+    2: "魔王已经提前溜了，这次的挑战没有生效",
+    3: "今天的挑战次数用完了哦~休息一下明天再来",
+}
+
+
+def worldboss_open_state(st):
+    """由 CMD142 状态推断本期能否上报伤害。
+
+    客户端 UI_WorldBossMain 判定 `WorldBossManager.getBossStatus() == 0` 才是开放，
+    status != 0 或已过 end_time 时服务端对 CMD170 一律回 result=1（与 data 内容无关）。
+    返回 True=开放 / False=已结束 / None=查询失败无法判断。
+    """
+    if not st or not st.get("ok"):
+        return None
+    status = st.get("status")
+    end_ms = int(st.get("end_time") or 0)
+    if status not in (0, None):
+        return False
+    if end_ms and int(time.time() * 1000) >= end_ms:
+        return False
+    return True
+
+
 def api_worldboss_damage(body):
-    """世界魔王伤害上报（CMD170，可选先发 CMD146）。"""
+    """世界魔王伤害上报（CMD170，可选先发 CMD146；默认先查 CMD142 状态）。"""
     acc, _lg = login_current()
     damage = int(body.get("damage") or 0)
     if damage <= 0:
@@ -1117,6 +1146,23 @@ def api_worldboss_damage(body):
     print(f"\n[worldboss] 上报伤害 {damage}  kind={kind}  monster={monster}  "
           f"data={len(data) if data is not None else len(m.WORLDBOSS_SAMPLE_DATA)}B"
           f"（{data_source}）  146={'是' if send_counter else '否'}")
+
+    # 先查本期状态：已结束时报 170 一定是 result=1，白白浪费一次请求
+    if body.get("precheck", True):
+        st = m.query_worldboss_status(acc["sid"], acc["uid"])
+        opened = worldboss_open_state(st)
+        if opened is False:
+            print(f"  ✗ 本期未开放：status={st.get('status')}  "
+                  f"结束 {st.get('end_time_text')}  下期 {st.get('next_start_text')}  → 不上报")
+            raise RuntimeError(
+                f"本期魔王已结束，现在上报必然被拒：status={st.get('status')}，"
+                f"本期结束 {st.get('end_time_text') or '未知'}，"
+                f"下期开始 {st.get('next_start_text') or '未知'}。"
+                f"服务端会回 result=1「{WORLDBOSS_RESULT_HINT[1]}」，与 data 无关")
+        if opened is True:
+            print(f"  · 本期开放中：已打 {st.get('fights')}/{st.get('max_fights')} 次"
+                  f"（剩余 {st.get('remaining')}），结束 {st.get('end_time_text')}")
+
     r = m.upload_worldboss_damage(acc["sid"], acc["uid"], damage,
                                   kind=kind, monster=monster, data=data,
                                   send_counter=send_counter,
@@ -1125,7 +1171,12 @@ def api_worldboss_damage(body):
         c = r["counter"]
         print(f"  ✓ 146 计数上传：result={c.get('result')} value={c.get('value')}")
     if not r.get("ok"):
-        raise RuntimeError(f"上报失败: {r.get('error') or r.get('result')}")
+        msg = r.get("error") or f"result={r.get('result')}"
+        hint = WORLDBOSS_RESULT_HINT.get(r.get("result"))
+        if hint:
+            msg = f"{msg} ——「{hint}」"
+        raise RuntimeError(f"上报失败: {msg}")
+
     print(f"  ✓ 上报成功：本次 {damage}  累计 {r['total_damage']}  "
           f"战斗次数 {r['fights']}（上限 {m.WORLDBOSS_MAX_FIGHTS}，"
           f"剩余 {r['remaining']}）")
@@ -1146,9 +1197,13 @@ def api_worldboss_status(body):
     st = m.query_worldboss_status(acc["sid"], acc["uid"])
     if not st.get("ok"):
         raise RuntimeError(f"查询失败: {st.get('error')}")
+    st["open"] = worldboss_open_state(st)
+    st["status_text"] = ("进行中" if st["open"] else
+                         ("已结束/未开放" if st["open"] is False else "未知"))
     print(f"  ✓ 累计伤害 {st['total_damage']}  战斗次数 {st['fights']}"
           f"（上限 {st['max_fights']}，剩余 {st['remaining']}）"
-          f"  排名 {st['rank']}  结束 {st['end_time_text']}")
+          f"  排名 {st['rank']}  状态 {st['status_text']}(status={st['status']})"
+          f"  结束 {st['end_time_text']}")
     return {"account": public_account(acc), **st}
 
 
