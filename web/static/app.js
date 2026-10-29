@@ -129,17 +129,25 @@ function renderStorage(st) {
     el.hidden = true;
     return;
   }
-  // 账号走数据库时不依赖本地磁盘，不会因为重新部署丢数据
-  if (st.backend === "mysql" || st.persistent) {
-    el.hidden = true;
-    return;
+  const db = st.db || {};
+  const parts = [];
+
+  // 账号没走数据库：把具体原因写在页面上，省得去翻服务器日志
+  if (st.backend !== "mysql") {
+    const why = db.detail || db.reason || "未知原因";
+    parts.push(
+      `⚠ 账号没有走数据库：<b>${esc(why)}</b>` +
+      `<br>当前用的是本地文件 <code>${esc(st.store || st.dir || "")}</code>，` +
+      `重新部署就会丢。配好 <code>ZHAOHE_DB_HOST</code> 等环境变量后重启即可。`
+    );
   }
-  el.hidden = false;
-  el.innerHTML =
-    `⚠ 数据目录 <b>${esc(st.dir)}</b> 不是持久盘：平台重新部署或休眠唤醒后，` +
-    `导入的账号会丢失。<br>解决办法：给服务挂一个持久磁盘，并把环境变量 ` +
-    `<code>ZHAOHE_DATA_DIR</code> 指向挂载点（如 <code>/var/data</code>）；` +
-    `或者配置数据库（<code>ZHAOHE_DB_HOST</code>）把账号存到 MySQL。`;
+
+  if (!st.persistent && st.backend !== "mysql") {
+    parts.push(`数据目录 <b>${esc(st.dir)}</b> 不是持久盘。`);
+  }
+
+  el.hidden = parts.length === 0;
+  el.innerHTML = parts.join("<br>");
 }
 
 function renderTemplate(t) {
@@ -233,6 +241,24 @@ function renderRank(data) {
 // ───────────── 事件绑定 ─────────────
 function bind() {
   $("btnRefresh").onclick = () => act("刷新", refresh);
+
+  const dbBtn = $("btnDbCheck");
+  if (dbBtn) {
+    dbBtn.onclick = async () => {
+      const out = await act("数据库检测", () => api("/api/db/check", "POST", {}));
+      if (!out) return;
+      let t;
+      if (out.ok) {
+        t = `数据库正常：${out.target}，${out.accounts} 个账号，当前 ${out.current ?? "-"}`;
+        toast(t, "ok");
+      } else {
+        t = `数据库异常：${out.detail || out.reason || "未知"}`
+          + `（配置=${out.configured ? "有" : "无"}，驱动=${out.driver ? "有" : "无"}）`;
+        toast("数据库检测失败，详见日志", "bad");
+      }
+      $("accountInfo").textContent = t;
+    };
+  }
 
   $("btnSelect").onclick = async () => {
     const uid = $("accountSelect").value;

@@ -162,6 +162,12 @@ def uptime_info():
 
 # 账号存储后端：启用数据库时指向 account_db 模块，否则 None（用 accounts.json）
 DB_BACKEND = None
+# 数据库启用失败的诊断信息（会在页面横幅和 /api/state 里显示，不用翻日志）
+DB_STATUS = {"enabled": False, "reason": "unknown", "detail": ""}
+
+
+def _set_db_status(enabled, reason="", detail=""):
+    DB_STATUS.update({"enabled": bool(enabled), "reason": reason, "detail": detail})
 
 
 def _install_db_store():
@@ -169,26 +175,34 @@ def _install_db_store():
 
     只替换三个底层函数 —— `save_account` / `load_saved_account` / `_load_account_pool`
     等上层逻辑全都基于它们，换掉即可全局生效。
-    数据库没配置 / 驱动没装 / 连不上时，一律安静地退回 accounts.json。
+    数据库没配置 / 驱动没装 / 连不上时，一律退回 accounts.json，并把原因记进 DB_STATUS。
     """
     global DB_BACKEND
     try:
         import account_db as db
     except Exception as e:  # 模块本身有问题也不能拖垮服务
         print(f"  · 账号存储：accounts.json（account_db 未加载：{e}）")
+        _set_db_status(False, "module_error", f"account_db 未加载：{e}")
         return None
     if not db.config():
         print("  · 账号存储：accounts.json（未配置数据库）")
+        _set_db_status(False, "no_config",
+                       "没有数据库配置：服务端缺 ZHAOHE_DB_HOST 等环境变量，"
+                       "本地缺 db.local.json")
         return None
     if not db.enabled():
         print("  ! 已配置数据库但缺少 PyMySQL 驱动，本次退回 accounts.json")
         print("    安装：python3 -m pip install PyMySQL")
+        _set_db_status(False, "no_driver",
+                       "缺少 PyMySQL 驱动（pip install PyMySQL，或确认平台的 "
+                       "pip install -r requirements.txt 跑过）")
         return None
     try:
         db.ensure_schema()
         st = db.stats()
     except Exception as e:
         print(f"  ! 数据库不可用，退回 accounts.json：{type(e).__name__}: {e}")
+        _set_db_status(False, "connect_failed", f"{type(e).__name__}: {e}")
         return None
 
     orig_from_file = m._account_from_file
@@ -210,6 +224,7 @@ def _install_db_store():
     m._save_account_doc = db.save_doc
     m._account_from_file = _db_account_from_file
     DB_BACKEND = db
+    _set_db_status(True, "ok", db.describe())
     print(f"  · 账号存储：MySQL {db.describe()}"
           f"（{st['accounts']} 个账号，表 {db.TABLE}）")
     return db
@@ -220,6 +235,21 @@ def store_label():
     if DB_BACKEND:
         return f"MySQL/{DB_BACKEND.TABLE}"
     return rel(m.ACCOUNT_FILE)
+
+
+def db_diag():
+    """数据库诊断信息（页面横幅 / /api/state / /api/db/check 共用）。"""
+    d = dict(DB_STATUS)
+    try:
+        import account_db as db
+        d["configured"] = bool(db.config())
+        d["driver"] = db._pymysql() is not None
+        d["target"] = db.describe()
+    except Exception as e:
+        d.setdefault("configured", False)
+        d.setdefault("driver", False)
+        d["target"] = f"不可用: {e}"
+    return d
 
 
 # ─────────────────────────────────────
@@ -423,10 +453,50 @@ def api_state(_body=None):
                     "persistent": data_persistent(),
                     "backend": "mysql" if DB_BACKEND else "json",
                     "store": store_label(),
+                    "db": db_diag(),
                     "account_file_exists": (True if DB_BACKEND
                                             else os.path.exists(m.ACCOUNT_FILE))},
         "uptime": uptime_info(),
     }
+
+
+def api_db_check(_body=None):
+    """现场体检一次数据库连接：配置是否齐、驱动在不在、能不能连上、库里几个号。
+
+    ★ 不抛异常，把每一步的结果都返回，方便部署到服务器后直接看原因。
+    """
+    info = db_diag()
+    print(f"\n[db] 体检：configured={info.get('configured')} "
+          f"driver={info.get('driver')} enabled={info.get('enabled')} "
+          f"目标={info.get('target')}")
+    out = {"configured": bool(info.get("configured")),
+           "driver": bool(info.get("driver")),
+           "enabled": bool(info.get("enabled")),
+           "reason": info.get("reason"),
+           "detail": info.get("detail"),
+           "target": info.get("target"),
+           "ok": False, "accounts": None, "current": None,
+           "host": os.environ.get("ZHAOHE_DB_HOST") or "",
+           "env": {k: ("已设置" if os.environ.get(k) else "未设置")
+                   for k in ("ZHAOHE_DB_HOST", "ZHAOHE_DB_PORT", "ZHAOHE_DB_USER",
+                             "ZHAOHE_DB_PASSWORD", "ZHAOHE_DB_NAME",
+                             "ZHAOHE_DB_SSL_CA")}}
+    if not out["configured"]:
+        print("  ✗ 没有数据库配置（缺 ZHAOHE_DB_HOST，或本地缺 db.local.json）")
+        return out
+    if not out["driver"]:
+        print("  ✗ 缺少 PyMySQL 驱动")
+        return out
+    try:
+        import account_db as db
+        st = db.stats()
+        out.update({"ok": True, "accounts": st["accounts"],
+                    "current": st["current"]})
+        print(f"  ✓ 连接成功：{st['accounts']} 个账号，current={st['current']}")
+    except Exception as e:
+        out["detail"] = f"{type(e).__name__}: {e}"
+        print(f"  ✗ 连接失败：{out['detail']}")
+    return out
 
 
 def api_register(_body=None):
@@ -1483,6 +1553,7 @@ def api_logs(query):
 # ─────────────────────────────────────
 ROUTES = {
     ("GET", "/api/state"): api_state,
+    ("POST", "/api/db/check"): api_db_check,
     ("POST", "/api/account/register"): api_register,
     ("POST", "/api/account/select"): api_account_select,
     ("POST", "/api/account/login"): api_account_login,
