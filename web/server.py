@@ -137,6 +137,29 @@ LOCK = threading.RLock()
 LOG_RING = []
 MAX_RING = 300
 
+# 服务启动时刻（用于页面右上角「运行时长」）
+STARTED_AT = time.time()
+STARTED_STR = datetime.fromtimestamp(STARTED_AT).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def fmt_uptime(seconds):
+    """把秒数折成「X年X月X日X时X分X秒」。
+
+    按 365 天/年、30 天/月 的口径折算（运行时长不是日历日期，不需要精确月份长度）。
+    """
+    sec = max(0, int(seconds))
+    days, rem = divmod(sec, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, secs = divmod(rem, 60)
+    years, days = divmod(days, 365)
+    months, days = divmod(days, 30)
+    return f"{years}年{months}月{days}日{hours}时{mins}分{secs}秒"
+
+
+def uptime_info():
+    sec = int(time.time() - STARTED_AT)
+    return {"seconds": sec, "text": fmt_uptime(sec), "started_at": STARTED_STR}
+
 # 账号存储后端：启用数据库时指向 account_db 模块，否则 None（用 accounts.json）
 DB_BACKEND = None
 
@@ -402,6 +425,7 @@ def api_state(_body=None):
                     "store": store_label(),
                     "account_file_exists": (True if DB_BACKEND
                                             else os.path.exists(m.ACCOUNT_FILE))},
+        "uptime": uptime_info(),
     }
 
 
@@ -467,6 +491,17 @@ def api_account_import(body):
         raise RuntimeError("userName / passwd 不能为空")
     acc = {"userName": user, "passwd": pwd,
            "nickName": (body.get("nickName") or user).strip()}
+    # ★ 按玩家（userName）去重：库里已有这个人就以库里的 uid 为准，
+    #   否则填进来的 uid 稍有偏差（历史遗留的影子 uid）就会多出一条重复账号
+    pool = m._load_account_pool()
+    dup = next((r for r in pool.values()
+                if str(r.get("userName") or "").strip().lower() == user.lower()), None)
+    if dup:
+        old = str(dup.get("uid"))
+        if uid and str(uid) != old:
+            print(f"  ! 库里已有该玩家（uid={old}），忽略传入的 uid={uid}")
+        uid = old
+        print(f"  · 玩家已存在，按更新处理（uid={old}）")
     if uid:
         acc["uid"] = int(uid)
     if not acc.get("uid"):
@@ -477,7 +512,7 @@ def api_account_import(body):
         print(f"  ✓ 登录校验通过 uid={acc['uid']}")
     rec = m.save_account(acc, make_current=True, source="web-import")
     print(f"  ✓ 已导入账号 uid={acc['uid']} user={user} -> {store_label()}")
-    return {"current": public_account(rec)}
+    return {"current": public_account(rec), "existed": bool(dup)}
 
 
 def api_account_nickname(body):
@@ -1024,9 +1059,21 @@ def api_accounts_import(body):
     items, file_current = _normalize_import(raw)
     select = bool(body.get("select"))
 
-    added = updated = skipped = 0
+    added = updated = skipped = dupe = 0
     errors = []
     imported_uids = []
+
+    # ★ 现有账号索引（一次读出，循环里不再重复查库）
+    #   · 按 uid：命中 = 更新同一条
+    #   · 按 userName：命中但 uid 不同 = 同一个玩家换了 uid 想再进来 → 直接过滤，
+    #     否则就会像之前那样多出一堆「用户名/密码都一样、只差尾数」的影子账号
+    pool = m._load_account_pool()
+    by_uid = {str(k) for k in pool}
+    by_user = {}
+    for k, r in pool.items():
+        u = str(r.get("userName") or "").strip().lower()
+        if u:
+            by_user.setdefault(u, str(k))
 
     for idx, rec in enumerate(items, 1):
         if not isinstance(rec, dict):
@@ -1047,10 +1094,19 @@ def api_accounts_import(body):
             errors.append(f"#{idx} uid 不是数字：{uid!r}")
             continue
 
-        exists = uid in m._load_account_pool()
+        key = user.lower()
+        if uid not in by_uid and key in by_user:
+            skipped += 1
+            dupe += 1
+            errors.append(f"#{idx} 玩家已存在（库中 uid={by_user[key]}），已过滤 {user}")
+            continue
+
+        exists = uid in by_uid
         m.save_account({**rec, "uid": int(uid), "userName": user, "passwd": pwd},
                        make_current=False, source="web-import-list")
         imported_uids.append(uid)
+        by_uid.add(uid)
+        by_user.setdefault(key, uid)
         if exists:
             updated += 1
         else:
@@ -1066,14 +1122,16 @@ def api_accounts_import(body):
             if rec:
                 m.save_account(rec, make_current=True, source="web-import-list")
 
-    print(f"  ✓ 导入完成：新增 {added}，更新 {updated}，跳过 {skipped}")
+    print(f"  ✓ 导入完成：新增 {added}，更新 {updated}，"
+          f"过滤重复玩家 {dupe}，跳过 {skipped}")
     for e in errors[:10]:
         print(f"    · {e}")
     if target:
         print(f"  ✓ 当前账号已切换 -> uid={target}")
 
     return {"added": added, "updated": updated, "skipped": skipped,
-            "errors": errors[:50], "total": len(m._load_account_pool()),
+            "dupe": dupe, "errors": errors[:50],
+            "total": len(m._load_account_pool()),
             "current": public_account(current_account())}
 
 
@@ -1625,6 +1683,12 @@ class Handler(BaseHTTPRequestHandler):
             fn = QUERY_ROUTES[path]
             res = run_logged(_uid_of(query), path, lambda: fn(query))
             self._send_json(res)
+            return
+
+        if path in ("/api/uptime",):
+            # 前端每秒轮询一次，不进日志、不查数据库，纯内存计算
+            self._send_json({"ok": True, "data": uptime_info(),
+                             "logs": [], "error": None})
             return
 
         if path in ("/api/state",):

@@ -399,9 +399,9 @@ function bind() {
       }));
     if (out) {
       $("impListInfo").textContent =
-        `新增 ${out.added}，更新 ${out.updated}，跳过 ${out.skipped}，` +
-        `账号总数 ${out.total}` +
-        (out.errors && out.errors.length ? `；问题：${out.errors.join("；")}` : "");
+        `新增 ${out.added}，更新 ${out.updated}，过滤重复玩家 ${out.dupe || 0}，` +
+        `跳过 ${out.skipped}，账号总数 ${out.total}` +
+        (out.errors && out.errors.length ? `；${out.errors.join("；")}` : "");
       $("impListFile").value = "";
       $("impListText").value = "";
       await refresh();
@@ -542,8 +542,52 @@ function esc(s) {
   }[c]));
 }
 
+// ───────────── 服务运行时长（右上角） ─────────────
+// 取一次服务端秒数，之后本地每秒自增（30 秒再校准一次），避免每秒打接口
+let upSec = null;
+let upTs = 0;
+
+function fmtUptime(seconds) {
+  const t = Math.max(0, Math.floor(seconds));
+  const days = Math.floor(t / 86400);
+  const h = Math.floor((t % 86400) / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = t % 60;
+  const y = Math.floor(days / 365);
+  const mo = Math.floor((days % 365) / 30);
+  const d = (days % 365) % 30;
+  return `${y}年${mo}月${d}日${h}时${m}分${s}秒`;
+}
+
+async function syncUptime() {
+  try {
+    const res = await fetch("/api/uptime", { cache: "no-store" });
+    const j = await res.json();
+    if (j && j.ok && j.data) {
+      upSec = j.data.seconds;
+      upTs = Date.now();
+    }
+  } catch (e) {
+    /* 网络抖动不影响页面 */
+  }
+}
+
+function startUptime() {
+  const el = $("uptime");
+  if (!el) return;
+  syncUptime().then(() => {
+    if (upSec != null) el.textContent = `运行 ${fmtUptime(upSec)}`;
+  });
+  setInterval(() => {
+    if (upSec == null) return;
+    el.textContent = `运行 ${fmtUptime(upSec + (Date.now() - upTs) / 1000)}`;
+  }, 1000);
+  setInterval(syncUptime, 30000);
+}
+
 window.addEventListener("DOMContentLoaded", async () => {
   bind();
+  startUptime();
   try {
     await refresh();
   } catch (e) {
