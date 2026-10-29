@@ -99,10 +99,6 @@ def fmt_ts(ts):
         return ""
 
 
-def _local_tz():
-    return datetime.now().astimezone().tzinfo
-
-
 def created_day(acc):
     """账号 createdAt（本地时间字符串）→ 北京时间 YYYYMMDD。
 
@@ -111,7 +107,9 @@ def created_day(acc):
     """
     s = str(acc.get("createdAt") or "").strip()
     try:
-        dt = datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=_local_tz())
+        # ★ createdAt 统一按北京时间写（offline_play.now_bj_str），这里也必须按
+        #   北京时间解析；用「本机时区」会让 Render（UTC）把号算到别的日期上。
+        dt = datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=BEIJING)
         return day_key(dt.astimezone(BEIJING))
     except Exception:
         return s[:10].replace("-", "")

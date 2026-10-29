@@ -114,7 +114,7 @@ import struct
 import sys
 import time
 import zlib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, ".")
 import zhaohe_protocol as P
@@ -128,6 +128,22 @@ NETDATA_PATH = os.path.join(CONTAINER, "data", "NetData.bin")
 TEMPLATE_DEFAULT = "/Users/suramire/Documents/soco.bin"
 # NetData 模板（游戏正常生成的结构，含完整尾部对象）
 NETDATA_TEMPLATE = "/Volumes/PortableSSD/ai_projects/zhaohe/accounts/1535687619940233216/NetData.bin"
+
+# 游戏时间是北京时间：Render 之类的服务器跑在 UTC，所有「给人看的时间」和
+# 账号创建时间都统一按 UTC+8 写，否则本地（UTC+8）和服务器（UTC）会差 8 小时，
+# 「当天创建的号」会被算到前一天/后一天。
+TZ_BJ = timezone(timedelta(hours=8))
+
+
+def now_bj():
+    """当前北京时间（带时区）。"""
+    return datetime.now(TZ_BJ)
+
+
+def now_bj_str():
+    """当前北京时间字符串 'YYYY-MM-DD HH:MM:SS'（账号 createdAt/updated 用）。"""
+    return now_bj().strftime("%Y-%m-%d %H:%M:%S")
+
 
 CMD136 = 136
 CMD60 = 60                        # ChangeValuesReq / Ack（批量写入玩家数值，key1=等级）
@@ -784,7 +800,7 @@ def format_end_time(ms):
     if ms <= 0:
         return ""
     try:
-        return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+        return datetime.fromtimestamp(ms / 1000, TZ_BJ).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return str(ms)
 
@@ -1430,7 +1446,7 @@ def save_account(acc, make_current=True, source=None):
               "sid", "servertime", "status"):
         if acc.get(k) is not None:
             rec[k] = acc[k]
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_bj_str()          # 统一北京时间，服务器在 UTC 也不会错位
     # 导入时允许带上 createdAt，但已有记录不会被覆盖
     if acc.get("createdAt") and not rec.get("createdAt"):
         rec["createdAt"] = acc["createdAt"]
