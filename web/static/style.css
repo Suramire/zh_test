@@ -170,6 +170,22 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-
 
 .muted { color: var(--muted); font-size: 12.5px; }
 
+.counter-label {
+  font-size: 14px;
+  color: var(--muted);
+  background: var(--card2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 14px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.counter-label b {
+  color: var(--accent);
+  font-size: 18px;
+  margin: 0 2px;
+}
+
 .rank-box {
   background: var(--card2);
   border: 1px solid var(--line);

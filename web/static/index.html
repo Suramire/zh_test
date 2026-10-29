@@ -20,6 +20,15 @@
   <div id="storageWarn" class="warn" hidden></div>
 
   <section class="card">
+    <h2>定时计数器</h2>
+    <div class="row">
+      <button id="btnCounter" class="primary">开始计数</button>
+      <span class="counter-label">计数：<b id="counterValue">0</b> 次</span>
+      <span id="counterState" class="muted">已停止 · 开始后每 1 分钟 +1</span>
+    </div>
+  </section>
+
+  <section class="card">
     <h2>账号 <span id="storeTag" class="h2tag">…</span></h2>
     <div class="row">
       <select id="accountSelect"></select>

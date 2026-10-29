@@ -30,7 +30,7 @@ function setBusy(on) {
   busyCount += on ? 1 : -1;
   if (busyCount < 0) busyCount = 0;
   document.querySelectorAll("button").forEach((b) => {
-    if (b.id === "btnClearLog" || b.id === "btnExportLog") return;
+    if (b.id === "btnClearLog" || b.id === "btnExportLog" || b.id === "btnCounter") return;
     b.disabled = busyCount > 0;
   });
 }
@@ -255,6 +255,7 @@ function renderRank(data) {
 // ───────────── 事件绑定 ─────────────
 function bind() {
   $("btnRefresh").onclick = () => act("刷新", refresh);
+  bindCounter();
 
   const dbBtn = $("btnDbCheck");
   if (dbBtn) {
@@ -586,6 +587,63 @@ function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
+}
+
+// ───────────── 定时计数器 ─────────────
+// 点「开始计数」后每 1 分钟 +1，再点一次停止；计数按开始时间戳推算，不受定时器漂移影响
+const COUNTER_INTERVAL_MS = 60 * 1000;
+let counterRunning = false;
+let counterBase = 0; // 本轮开始时的计数
+let counterStartTs = 0; // 本轮开始的本地时间戳
+let counterTimer = null;
+
+function counterValue() {
+  if (!counterRunning) return counterBase;
+  return counterBase + Math.floor((Date.now() - counterStartTs) / COUNTER_INTERVAL_MS);
+}
+
+function fmtCountdown(ms) {
+  const t = Math.max(0, Math.ceil(ms / 1000));
+  return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
+}
+
+function renderCounter() {
+  const val = counterValue();
+  $("counterValue").textContent = val;
+  $("btnCounter").textContent = counterRunning ? "停止计数" : "开始计数";
+  if (counterRunning) {
+    const elapsed = (Date.now() - counterStartTs) % COUNTER_INTERVAL_MS;
+    $("counterState").textContent =
+      `运行中 · 每 1 分钟 +1 · 距下次 +1 还有 ${fmtCountdown(COUNTER_INTERVAL_MS - elapsed)}`;
+  } else {
+    $("counterState").textContent = `已停止 · 当前计数 ${val}，点「开始计数」继续累加`;
+  }
+}
+
+function startCounter() {
+  if (counterRunning) return;
+  counterRunning = true;
+  counterStartTs = Date.now();
+  counterTimer = setInterval(renderCounter, 500);
+  renderCounter();
+  toast("计数器已开始，每 1 分钟 +1", "ok");
+}
+
+function stopCounter() {
+  if (!counterRunning) return;
+  counterBase = counterValue();
+  counterRunning = false;
+  clearInterval(counterTimer);
+  counterTimer = null;
+  renderCounter();
+  toast(`计数器已停止，共 ${counterBase} 次`, "");
+}
+
+function bindCounter() {
+  const btn = $("btnCounter");
+  if (!btn) return;
+  btn.onclick = () => (counterRunning ? stopCounter() : startCounter());
+  renderCounter();
 }
 
 // ───────────── 服务运行时长（右上角） ─────────────
