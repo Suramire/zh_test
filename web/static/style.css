@@ -36,6 +36,21 @@ header {
 
 header h1 { font-size: 16px; margin: 0; letter-spacing: .5px; }
 
+.h2tag {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: var(--card2);
+  margin-left: 8px;
+  vertical-align: middle;
+  letter-spacing: 0;
+}
+.h2tag.ok { color: #6ee7a8; border-color: #2f6b47; }
+.h2tag.bad { color: #ff8f8f; border-color: #7a2b2b; }
+
 .hdr-right {
   display: flex;
   align-items: center;

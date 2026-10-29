@@ -118,7 +118,7 @@ function renderAccounts(list) {
   const cur = list.find((a) => a.current);
   const af = (STATE.paths && STATE.paths.account_file) || "accounts.json";
   $("accountInfo").textContent = cur
-    ? `账号文件：${af}（current=${cur.uid}）　创建：${cur.createdAt || "-"}　更新：${cur.updated || "-"}　存档目录：accounts/${cur.uid}/`
+    ? `账号来源：${af}（current=${cur.uid}）　创建：${cur.createdAt || "-"}　更新：${cur.updated || "-"}　存档目录：accounts/${cur.uid}/`
     : `账号文件：${af}（还没有账号）`;
 }
 
@@ -131,6 +131,20 @@ function renderStorage(st) {
   }
   const db = st.db || {};
   const parts = [];
+
+  // 账号来源标签：一眼看出这批账号到底是从数据库读的，还是本地文件
+  const tag = $("storeTag");
+  if (tag) {
+    if (st.backend === "mysql") {
+      tag.textContent = st.store || "MySQL";
+      tag.className = "h2tag ok";
+      tag.title = db.detail || "";
+    } else {
+      tag.textContent = "本地文件（未用数据库）";
+      tag.className = "h2tag bad";
+      tag.title = db.detail || db.reason || "";
+    }
+  }
 
   // 账号没走数据库：把具体原因写在页面上，省得去翻服务器日志
   if (st.backend !== "mysql") {

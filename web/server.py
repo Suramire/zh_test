@@ -198,8 +198,19 @@ def _install_db_store():
                        "pip install -r requirements.txt 跑过）")
         return None
     try:
-        db.ensure_schema()
-        st = db.stats()
+        last = None
+        for attempt in range(1, 4):
+            try:
+                db.ensure_schema()
+                st = db.stats()
+                break
+            except Exception as e:
+                last = e
+                if attempt < 3:
+                    print(f"  … 数据库连接失败（{attempt}/3）：{type(e).__name__}: {e}，2s 后重试")
+                    time.sleep(2)
+        else:
+            raise last
     except Exception as e:
         print(f"  ! 数据库不可用，退回 accounts.json：{type(e).__name__}: {e}")
         _set_db_status(False, "connect_failed", f"{type(e).__name__}: {e}")
@@ -235,6 +246,35 @@ def store_label():
     if DB_BACKEND:
         return f"MySQL/{DB_BACKEND.TABLE}"
     return rel(m.ACCOUNT_FILE)
+
+
+# 启动时连不上数据库的话，后续请求里每 30 秒重试一次（TiDB Serverless 冷启动、
+# 网络抖动都可能让第一次连接超时，以前会一直卡在 accounts.json 直到手动重启）
+_DB_LAST_TRY = 0.0
+_DB_RETRY_SEC = 30.0
+
+
+def db_configured():
+    try:
+        import account_db as db
+        return bool(db.config())
+    except Exception:
+        return False
+
+
+def ensure_db_store():
+    """确保数据库后端已挂上；没挂上就按节流重试。"""
+    global _DB_LAST_TRY
+    if DB_BACKEND is not None:
+        return DB_BACKEND
+    now = time.time()
+    if now - _DB_LAST_TRY < _DB_RETRY_SEC:
+        return None
+    _DB_LAST_TRY = now
+    if not db_configured():
+        return None
+    print("  … 重试启用数据库存储 ...")
+    return _install_db_store()
 
 
 def db_diag():
@@ -338,6 +378,7 @@ def run_logged(uid, action, fn):
     ok, err, data = True, None, None
     with LOCK:
         try:
+            ensure_db_store()      # 启动时没连上数据库的话，这里会按节流重试
             with redirect_stdout(buf), redirect_stderr(buf):
                 data = fn()
         except Exception as e:
