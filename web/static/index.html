@@ -154,6 +154,26 @@
   </section>
 
   <section class="card">
+    <h2>自动刷榜 <span id="autoRankTag" class="h2tag">未启动</span></h2>
+    <div class="row">
+      <button id="btnAutoRank" class="primary">启动自动刷榜</button>
+      <button id="btnAutoRankNow" class="ghost">立即执行一次</button>
+      <span id="autoRankInfo" class="muted">每天 0 点：当天没号才建 10 个（片刻 + 日期码 + 序号）；常规榜每小时压到榜一−100，截止前 10 分钟冲到榜一+100；魔王/竞技场也只在各自截止前 10 分钟动手</span>
+    </div>
+    <div class="row"><span id="autoRankNext" class="muted"></span></div>
+    <div class="table-wrap">
+      <table id="autoRankTable">
+        <thead>
+          <tr><th>日期</th><th>账号</th><th>当前账号</th><th>常规榜截止</th><th>世界魔王</th><th>竞技场</th><th>状态</th><th>最近结果</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="row"><span class="muted">运行日志（服务端内存，最多保留 400 行）</span></div>
+    <pre id="autoRankLog" class="log"></pre>
+  </section>
+
+  <section class="card">
     <h2>世界魔王 · 伤害上报</h2>
     <div class="row">
       <input id="wbDamage" type="number" min="1" placeholder="伤害值，如 10000000" class="wide">

@@ -340,6 +340,45 @@ def stats():
     return {"accounts": int(n), "current": (m.get("v") if m else None)}
 
 
+_ACC_COLS = ["uid", "user_name", "passwd", "nick_name", "player_level", "sid",
+             "servertime", "status", "source", "extra", "created_at", "updated_at"]
+
+
+def upsert_account(acc):
+    """单个账号 UPSERT（自动刷榜建号后显式落库用），不改 current_uid。"""
+    if not acc or not acc.get("uid"):
+        raise RuntimeError("upsert_account: 缺少 uid")
+    row = _acc_to_row(acc["uid"], acc)
+    ensure_schema()
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            upd = ", ".join(f"`{c}`=VALUES(`{c}`)" for c in _ACC_COLS[1:])
+            cur.execute(
+                f"INSERT INTO `{TABLE}` ({', '.join('`%s`' % c for c in _ACC_COLS)}) "
+                f"VALUES ({', '.join(['%s'] * len(_ACC_COLS))}) "
+                f"ON DUPLICATE KEY UPDATE {upd}",
+                [row[c] for c in _ACC_COLS])
+    finally:
+        conn.close()
+    return row
+
+
+def get_account(uid):
+    """按 uid 读一条账号（回读校验用），不存在返回 None。"""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT `uid`,`user_name`,`passwd`,`nick_name`,`player_level`,"
+                f"`sid`,`servertime`,`status`,`source`,`extra`,`created_at`,`updated_at` "
+                f"FROM `{TABLE}` WHERE `uid`=%s", (int(uid),))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    return _row_to_acc(row) if row else None
+
+
 def sync_from_json(path, force=False):
     """把 accounts.json 导入数据库。表里已有数据时默认跳过（force=True 覆盖）。"""
     if not os.path.exists(path):

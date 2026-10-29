@@ -256,6 +256,7 @@ function renderRank(data) {
 function bind() {
   $("btnRefresh").onclick = () => act("刷新", refresh);
   bindCounter();
+  bindAutoRank();
 
   const dbBtn = $("btnDbCheck");
   if (dbBtn) {
@@ -672,6 +673,123 @@ function bindCounter() {
     clearInterval(counterSync);
     counterSync = setInterval(syncCounter, 10000);
   });
+}
+
+// ───────────── 自动刷榜（服务端调度） ─────────────
+// 开关 / 建号 / 查榜 / jump 全在 Python 后台线程里跑，页面只负责展示和触发。
+let autoRankState = { enabled: false, tasks: [], logs: [] };
+let autoRankTimer = null;
+
+function fmtLeft(sec) {
+  const t = Math.max(0, Math.floor(sec));
+  const m = Math.floor(t / 60);
+  const s = t % 60;
+  return `${m}分${String(s).padStart(2, "0")}秒`;
+}
+
+function renderAutoRank(d) {
+  if (!d) return;
+  autoRankState = d;
+
+  const tag = $("autoRankTag");
+  if (tag) {
+    let text = "未启动";
+    let cls = "h2tag";
+    if (d.enabled && d.finished) { text = "今日已结束"; }
+    else if (d.enabled && d.running) { text = "运行中"; cls = "h2tag ok"; }
+    else if (d.enabled) { text = "已启动"; cls = "h2tag ok"; }
+    tag.textContent = text;
+    tag.className = cls;
+  }
+
+  const btn = $("btnAutoRank");
+  btn.textContent = d.enabled ? "停止自动刷榜" : "启动自动刷榜";
+  btn.classList.toggle("primary", !d.enabled);
+
+  const store = d.store ? ` · 账号库：${d.store}` : "";
+  if (!d.enabled) {
+    $("autoRankNext").textContent =
+      "开关关闭。点「启动自动刷榜」立即开始今日任务；开关打开后每天北京时间 0 点自动触发。"
+      + store;
+  } else if (d.finished) {
+    $("autoRankNext").textContent =
+      `今日（${d.today}）任务已结束，等待明日北京时间 0 点自动开始。` + store;
+  } else {
+    const left = d.seconds_to_tick != null ? `（${fmtLeft(d.seconds_to_tick)}后）` : "";
+    $("autoRankNext").textContent =
+      `今日 ${d.today} · ${d.running ? "正在执行本轮" : "等待下一轮"}` +
+      ` · 常规榜下次校准：${d.next_tick_text || "即将开始"}${left}` +
+      ` · ${d.sprint_active ? "★ 冲刺窗口内，每 2 分钟复查" : "未到冲刺窗口"}` + store;
+  }
+
+  const tb = $("autoRankTable").querySelector("tbody");
+  tb.innerHTML = "";
+  if (!d.tasks || !d.tasks.length) {
+    tb.innerHTML = `<tr><td colspan="8" class="muted">尚未开始（开关打开或点「立即执行一次」后开始建号）</td></tr>`;
+  } else {
+    const sub = (end, last) => {
+      if (!end && !last) return "-";
+      return esc(end || "-") + (last ? `<br><span class="muted">${esc(last)}</span>` : "");
+    };
+    for (const t of d.tasks) {
+      const tr = document.createElement("tr");
+      const status = t.done
+        ? `已结束：${esc(t.reason || "-")}`
+        : `进行中（${t.index + 1}/${t.accounts}）`;
+      tr.innerHTML =
+        `<td>${esc(t.day_text || t.day)}</td>` +
+        `<td>${t.accounts}</td>` +
+        `<td>${esc(t.current_nick || "-")}</td>` +
+        `<td>${esc(t.end_time_text || "-")}</td>` +
+        `<td>${sub(t.wb_end_text, t.wb_last)}</td>` +
+        `<td>${sub(t.arena_end_text, t.arena_last)}</td>` +
+        `<td>${status}</td>` +
+        `<td>${esc(t.last || "-")}</td>`;
+      tb.appendChild(tr);
+    }
+  }
+
+  const pre = $("autoRankLog");
+  const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+  pre.textContent = (d.logs || []).join("\n") || "（暂无日志）";
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
+}
+
+async function syncAutoRank() {
+  try {
+    const res = await fetch("/api/autorank/status", { cache: "no-store" });
+    const j = await res.json();
+    if (j && j.ok && j.data) renderAutoRank(j.data);
+  } catch (e) {
+    /* 网络抖动不影响页面 */
+  }
+}
+
+async function toggleAutoRank() {
+  const on = !autoRankState.enabled;
+  const out = await act(on ? "启动自动刷榜" : "停止自动刷榜",
+    () => api("/api/autorank/toggle", "POST", { on }));
+  if (!out) return;
+  renderAutoRank(out);
+  toast(on ? "自动刷榜已启动" : "自动刷榜已停止", "ok");
+}
+
+async function triggerAutoRank() {
+  const out = await act("立即执行自动刷榜",
+    () => api("/api/autorank/trigger", "POST", {}));
+  if (!out) return;
+  renderAutoRank(out);
+  toast(out.finished ? "今日任务已结束" : "已触发，后台开始执行", "ok");
+}
+
+function bindAutoRank() {
+  const btn = $("btnAutoRank");
+  if (!btn) return;
+  btn.onclick = toggleAutoRank;
+  $("btnAutoRankNow").onclick = triggerAutoRank;
+  syncAutoRank();
+  clearInterval(autoRankTimer);
+  autoRankTimer = setInterval(syncAutoRank, 3000);
 }
 
 // ───────────── 服务运行时长（右上角） ─────────────

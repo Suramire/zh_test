@@ -52,6 +52,9 @@ API
     POST /api/counter/start             开始计数（每 60 秒 +1）
     POST /api/counter/stop              停止计数（保留当前值）
     POST /api/counter/reset             停止并清零
+    GET  /api/autorank/status           自动刷榜状态 + 最近日志（纯内存）
+    POST /api/autorank/toggle           {on} 自动刷榜开关（开=立即开始今日任务）
+    POST /api/autorank/trigger          手动触发一次：建号（若未建）+ 查榜/冲榜
 """
 import argparse
 import base64
@@ -136,6 +139,7 @@ STATIC_DIR = os.path.join(ROOT, "web", "static")
 
 sys.path.insert(0, os.path.join(ROOT, "web"))
 from soco_template import TEMPLATE_SIZE, data as template_bytes  # noqa: E402
+import auto_rank  # noqa: E402
 
 LOCK = threading.RLock()
 LOG_RING = []
@@ -144,6 +148,9 @@ MAX_RING = 300
 # 服务启动时刻（用于页面右上角「运行时长」）
 STARTED_AT = time.time()
 STARTED_STR = datetime.fromtimestamp(STARTED_AT).strftime("%Y-%m-%d %H:%M:%S")
+
+# 自动刷榜（每天 0 点建号 + 每 10 分钟查榜/冲榜），线程在 main() 里启动
+AUTO_RANK = auto_rank.AutoRank(LOCK)
 
 
 def fmt_uptime(seconds):
@@ -341,6 +348,38 @@ def store_label():
     if DB_BACKEND:
         return f"MySQL/{DB_BACKEND.TABLE}"
     return rel(m.ACCOUNT_FILE)
+
+
+def db_sync_account(acc):
+    """把账号显式 UPSERT 进数据库并回读校验（自动刷榜建号后调用）。
+
+    即使主存储当前退回了 accounts.json，这里也会尽力把新号写进 MySQL，
+    保证「创建的账号一定在 SQL 库里」。返回 {"ok", "detail"}。
+    """
+    if not DB_BACKEND:
+        ensure_db_store()   # 没挂上就按节流再试一次
+    if not DB_BACKEND:
+        return {"ok": False,
+                "detail": f"数据库未启用（{DB_STATUS.get('reason') or '未知'}），"
+                          f"账号只写入了 {store_label()}"}
+    uid = int(acc["uid"])
+    last = None
+    for attempt in range(2):
+        try:
+            DB_BACKEND.upsert_account(acc)
+            row = DB_BACKEND.get_account(uid)
+            if not row:
+                raise RuntimeError("写入后回读不到该 uid")
+            return {"ok": True, "detail": f"MySQL/{DB_BACKEND.TABLE}"}
+        except Exception as e:
+            last = e
+            if attempt == 0:
+                time.sleep(1)
+    return {"ok": False, "detail": f"{type(last).__name__}: {last}"}
+
+
+# 自动刷榜建号后显式同步到数据库（回调在运行时才用到，DB_BACKEND 那时已确定）
+AUTO_RANK.db_sync = db_sync_account
 
 
 # 启动时连不上数据库的话，后续请求里每 30 秒重试一次（TiDB Serverless 冷启动、
@@ -1047,6 +1086,11 @@ def arena_rank(sid, uid, timeout=25, top=3):
             "size": size, "top": rows[:max(1, int(top))], "mine": mine, "error": None}
 
 
+# 自动刷榜也要用竞技场时间 / 排行榜：把这两个函数注入后台任务
+AUTO_RANK.pvp_time = pvp_time
+AUTO_RANK.arena_rank = arena_rank
+
+
 def api_arena_rank(_body=None):
     """只查排行榜（刷新按钮用）。服务端积分与存档积分一起返回，便于对照。"""
     acc, _lg = login_current()
@@ -1436,6 +1480,23 @@ def api_rank_jump(_body=None):
     }
 
 
+def api_autorank_toggle(body):
+    """自动刷榜开关：{on: true/false}；省略 on 则取反。"""
+    on = body.get("on")
+    if on is None:
+        on = not AUTO_RANK.enabled
+    st = AUTO_RANK.set_enabled(bool(on))
+    print(f"  · 自动刷榜开关 -> {'开' if st['enabled'] else '关'}")
+    return st
+
+
+def api_autorank_trigger(_body=None):
+    """手动触发一次：立即建号（若还没建）并查榜 / 冲榜。"""
+    st = AUTO_RANK.trigger()
+    print("  · 自动刷榜手动触发")
+    return st
+
+
 # CMD170 回包 result 对应的客户端文案（取自 core2.dex 的 new_worldboss_tishi1/2）
 #   1/2 → 「魔王已经提前溜了，这次的挑战没有生效」
 #   3   → 「今天的挑战次数用完了哦~休息一下明天再来」
@@ -1713,6 +1774,8 @@ ROUTES = {
     ("POST", "/api/counter/start"): api_counter_start,
     ("POST", "/api/counter/stop"): api_counter_stop,
     ("POST", "/api/counter/reset"): api_counter_reset,
+    ("POST", "/api/autorank/toggle"): api_autorank_toggle,
+    ("POST", "/api/autorank/trigger"): api_autorank_trigger,
 }
 
 QUERY_ROUTES = {
@@ -1912,6 +1975,13 @@ class Handler(BaseHTTPRequestHandler):
                              "logs": [], "error": None})
             return
 
+        if path in ("/api/autorank/status",):
+            # 自动刷榜状态 + 最近日志，纯内存，前端每 3 秒轮询
+            data = AUTO_RANK.status()
+            data["store"] = store_label()
+            self._send_json({"ok": True, "data": data, "logs": [], "error": None})
+            return
+
         if path in ("/api/state",):
             res = run_logged(None, path, api_state)
             self._send_json(res)
@@ -1965,6 +2035,7 @@ def main():
 
     m.migrate_current_account()
     _install_db_store()
+    AUTO_RANK.start()
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print("=" * 60)
     print("  zhaohe 脱机工具 Web 服务")

@@ -4,10 +4,13 @@
 
 1. **先部署本地 8000 端口验证**
    ```bash
+   # 首次/换 Python 解释器后先装依赖（PyMySQL 缺了页面会提示「账号没有走数据库」）
+   python3 -m pip install -r requirements.txt
+   # Homebrew Python 报 externally-managed 时加 --break-system-packages，或用 venv
    python3 web/server.py --port 8000
    # 另开终端：curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/health   # 期望 200
    ```
-   浏览器打开 <http://127.0.0.1:8000>，确认改动生效、页面无报错。已在跑的 8000 服务要先停掉再重启，确保加载的是新代码。
+   浏览器打开 <http://127.0.0.1:8000>，确认改动生效、页面无报错；配了 `db.local.json` 时顺手点一下「数据库检测」，确认 `backend=mysql`。已在跑的 8000 服务要先停掉再重启，确保加载的是新代码。
 2. **本地验证通过后，再提交并推送**
    ```bash
    git add -A
