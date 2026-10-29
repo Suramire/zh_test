@@ -1168,11 +1168,13 @@ def locate_uid_field(data, hint_uid=None):
     return cands
 
 
-def open_all_switches(data):
-    """把模板存档里的功能开关全部打开。
+def open_all_switches(data, unlock_skins=False):
+    """把模板存档里的功能开关打开。
 
-    · isShow[29]        —— find_isShow
-    · player_jiesuo[24] —— find_player_jiesuo
+    · isShow[29]        —— find_isShow（功能入口开关，默认开）
+    · player_jiesuo[24] —— find_player_jiesuo（**装扮解锁**，默认不动）
+      ★ 装扮和功能开关不是一回事：全置 1 会让新号一出生就拥有全部外观，
+        既不符合正常账号状态，也容易在服务端对不上。要解锁请显式传 unlock_skins=True。
     返回 (data, info)
     """
     data = bytearray(data)
@@ -1188,29 +1190,32 @@ def open_all_switches(data):
                 changed += 1
         info['isShow'] = f"{changed}/{len(raw)} 项置 1"
 
-    j = R.find_player_jiesuo(bytes(data))
-    if j:
-        off, raw = j
-        changed = 0
-        for k in range(len(raw)):
-            if data[off + k] != 1:
-                data[off + k] = 1
-                changed += 1
-        info['player_jiesuo'] = f"{changed}/{len(raw)} 项置 1"
+    if unlock_skins:
+        j = R.find_player_jiesuo(bytes(data))
+        if j:
+            off, raw = j
+            changed = 0
+            for k in range(len(raw)):
+                if data[off + k] != 1:
+                    data[off + k] = 1
+                    changed += 1
+            info['player_jiesuo'] = f"{changed}/{len(raw)} 项置 1（按 --unlock-skins 显式解锁）"
+    else:
+        info['player_jiesuo'] = "保持模板原值（未解锁装扮）"
 
     return bytes(data), info
 
 
 def build_save(template_path, target_uid, chapter, out_path=None,
-               open_switches=True):
-    """模板存档 → 全开开关 → 改章节 → 换 uid → 重算 CRC。"""
+               open_switches=True, unlock_skins=False):
+    """模板存档 → 开功能开关 → 改章节 → 换 uid → 重算 CRC。"""
     with open(template_path, "rb") as f:
         data = f.read()
     info = {}
 
-    # a) 功能开关全开
+    # a) 功能开关（装扮默认不解锁，除非显式要求）
     if open_switches:
-        data, sw = open_all_switches(data)
+        data, sw = open_all_switches(data, unlock_skins=unlock_skins)
         info.update(sw)
 
     # b) 章节（三处）
@@ -1938,6 +1943,8 @@ def main():
     ap.add_argument("--template", default=TEMPLATE_DEFAULT,
                     help=f"模板 soco.bin（默认 {TEMPLATE_DEFAULT}）")
     ap.add_argument("--no-switches", action="store_true", help="不打开模板里的功能开关")
+    ap.add_argument("--unlock-skins", action="store_true",
+                    help="同时解锁全部装扮（player_jiesuo 全置 1，默认不解锁）")
     ap.add_argument("--no-save", action="store_true", help="不生成/不写存档")
     ap.add_argument("--no-rank", action="store_true", help="不调用 CMD136 上报闯关")
     ap.add_argument("--no-write", action="store_true", help="只生成文件，不覆盖容器")
@@ -1990,6 +1997,7 @@ def main():
               f"CMD136 value={args.chapter*100}）")
         print(f"  [dry] 输出     : {args.out}")
         print(f"  [dry] 打开开关 : {'否' if args.no_switches else '是'}")
+        print(f"  [dry] 解锁装扮 : {'是（--unlock-skins）' if args.unlock_skins else '否'}")
         return
 
     # ── 1) 注册 ──
@@ -2034,7 +2042,8 @@ def main():
     print(f"\n[4/5] 用模板生成存档（第 {args.chapter} 章）...")
     print(f"  模板: {args.template}")
     data, info = build_save(args.template, acc['uid'], args.chapter,
-                            args.out, open_switches=not args.no_switches)
+                            args.out, open_switches=not args.no_switches,
+                            unlock_skins=args.unlock_skins)
     for k, v in info.items():
         print(f"  ✓ {k}: {v}")
     ch = R.locate_daxuanguan(data)
