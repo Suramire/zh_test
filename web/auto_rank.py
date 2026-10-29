@@ -15,6 +15,11 @@
    · 同样只在「今日竞技场关闭前 10 分钟」动作
    · 取非自己的榜一分数 + 随机 20~100 上报（CMD25 推分后立刻 CMD26 取消）
 
+比分数口径
+==========
+★ 所有「榜一」都排除数据库里已有的 uid：自己的号（今天/前 7 天的任务号）互相之间
+  不算榜一，只跟其他玩家比，避免几个号拿着彼此的分数反复 ±100 刷个不停。
+
 账号
 ====
 · 每天 0 点检查：当天没有账号才建 10 个（昵称 = 片刻 + 日期码 + 序号）；
@@ -149,6 +154,29 @@ def my_values(entries, uid):
     return vals
 
 
+def top_of_others(entries, own_uids, rank_type=None):
+    """在榜单 entries 里找「不是我们自己号」的榜一（rank 最小的一条）。
+
+    ★ 数据库里已有的 uid 全部排除：不同日期的任务号互相之间不算「榜一」，
+      否则几个号会拿彼此的分数反复 ±100，永远刷个不停。
+    """
+    best = None
+    for e in entries or []:
+        try:
+            if rank_type is not None and str(e.get("type")) != str(rank_type):
+                continue
+            if int(e.get("uid") or 0) in own_uids:
+                continue
+            r = int(e.get("rank", -1))
+        except Exception:
+            continue
+        if r <= 0:
+            continue
+        if best is None or r < int(best.get("rank", -1)):
+            best = e
+    return best
+
+
 def is_banned_error(err):
     """登录失败是否是服务端判定的「帐号异常」（cmd=255）。"""
     msg = str(err)
@@ -187,6 +215,7 @@ class AutoRank:
         self.last_error = None
         self.logs = deque(maxlen=LOG_LIMIT)
         self.banned = set()              # 已被服务端判「帐号异常」并删掉的 uid
+        self.own_uids = set()            # 数据库里所有账号的 uid（比分数时排除）
         self.wb_done = set()             # "uid:end_ms" 已上报过魔王伤害
         self.arena_pushed = {}           # "uid:end_ms" -> 上次推分时间
         self.thread = threading.Thread(target=self._loop, name="auto-rank", daemon=True)
@@ -328,6 +357,8 @@ class AutoRank:
             self._sync_tasks()
             if not self.enabled:
                 return
+            # 比分数只跟其他玩家比：先把自己库里所有 uid 收集起来
+            self.own_uids = self._collect_own_uids()
             now_ms = int(time.time() * 1000)
             tasks = list(self.tasks)
             if not tasks:
@@ -375,6 +406,21 @@ class AutoRank:
     def _pool(self):
         with self.lock:
             return m._load_account_pool() or {}
+
+    def _collect_own_uids(self):
+        """数据库里所有账号的 uid：算榜一/魔王/竞技场时全部排除。"""
+        uids = set()
+        for key, acc in (self._pool() or {}).items():
+            try:
+                uids.add(int(acc.get("uid") or key))
+            except Exception:
+                continue
+        for u in self.banned:
+            try:
+                uids.add(int(u))
+            except Exception:
+                pass
+        return uids
 
     def _ensure_today_batch(self):
         """当天没有账号才建 10 个；已有账号（手动建的也算）直接跳过。"""
@@ -614,29 +660,34 @@ class AutoRank:
             raise DeadlineReached(task["end_time_text"] or "已截止")
 
         entries = info.get("entries") or []
-        tops = m.rank_top_per_type(entries)
         mine = my_values(entries, uid)
         sprint = in_window(end_ms)
         notes = []
+        own = self.own_uids or {uid}
 
         for t, label in ((0, "大选关"), (1, "爬塔")):
-            top = tops.get(t)
-            if not top or int(top.get("rank", -1)) <= 0:
-                notes.append(f"{label}: 无榜一数据")
-                continue
-            if int(top["uid"]) == uid:
-                notes.append(f"{label}: 已是榜一，保持不动")
+            # ★ 只跟「其他玩家」比：自己库里（含其他日期的任务号）全部排除
+            top = top_of_others(entries, own, t)
+            if not top:
+                notes.append(f"{label}: 榜上没有其他玩家")
                 continue
 
             base = int(top.get("value") or 0)
+            my = mine.get(str(t))
             if sprint:
                 target = base + RANK_HIGH_GAP
                 if t == 0:
                     target = min(target, RANK_TYPE0_CAP)
                 mode = "冲刺"
+                if my is not None and my >= target:
+                    notes.append(f"{label}: 已达标（{my} ≥ {target}），跳过")
+                    continue
             else:
                 if not full:
                     notes.append(f"{label}: 非冲刺窗口，跳过")
+                    continue
+                if my is not None and my > base:
+                    notes.append(f"{label}: 已高于其他玩家榜一 {base}，保持不动")
                     continue
                 target = base - RANK_LOW_GAP
                 if t == 0:
@@ -645,7 +696,7 @@ class AutoRank:
             if target <= 0:
                 notes.append(f"{label}: 目标分数 {target} 无效，跳过")
                 continue
-            if mine.get(str(t)) == target:
+            if my == target:
                 notes.append(f"{label}: 已是目标 {target}，跳过")
                 continue
 
@@ -683,14 +734,11 @@ class AutoRank:
             task["wb"]["last"] = f"排行榜查询失败：{rk.get('error')}"
             return "魔王: 排行榜查询失败"
         entries = rk.get("entries") or []
-        top = entries[0] if entries else None
+        # ★ 排除自己库里所有号（其他日期的任务号伤害一样，会把目标越抬越高）
+        top = top_of_others(entries, self.own_uids or {uid})
         if not top:
-            task["wb"]["last"] = "伤害榜暂无数据"
-            return "魔王: 伤害榜暂无数据"
-        if int(top.get("uid") or 0) == uid:
-            task["wb"]["last"] = "已是榜一"
-            self.wb_done.add(key)
-            return "魔王: 已是榜一"
+            task["wb"]["last"] = "伤害榜上没有其他玩家"
+            return "魔王: 伤害榜上没有其他玩家"
 
         target = int(top.get("damage") or 0) + random.randint(*WB_BONUS)
         my_total = int(st.get("total_damage") or 0)
@@ -733,7 +781,8 @@ class AutoRank:
             task["arena"]["last"] = f"查榜失败：{rk.get('error')}"
             return "竞技场: 查榜失败"
         rows = rk.get("top") or []
-        top_other = next((r for r in rows if int(r.get("uid") or 0) != uid), None)
+        # ★ 只跟其他玩家比：自己库里的号（含其他日期任务号）全部排除
+        top_other = top_of_others(rows, self.own_uids or {uid})
         if not top_other:
             task["arena"]["last"] = "榜单里没有其他玩家"
             return "竞技场: 榜单里没有其他玩家"
