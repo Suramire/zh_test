@@ -219,7 +219,7 @@ function renderRank(data) {
         <div class="line">榜上暂无数据</div>`;
       continue;
     }
-    const isMe = data.account && Number(top.uid) === Number(data.account.uid);
+    const isMe = data.account && String(top.uid) === String(data.account.uid);
     const isTop = Number(top.rank) === 1;
     box.innerHTML = `
       <div class="title">${labels[t]} · type=${t}</div>
@@ -236,10 +236,10 @@ function renderRank(data) {
     tb.innerHTML = `<tr><td colspan="6" class="muted">无数据</td></tr>`;
     return;
   }
-  const myUid = data.account ? Number(data.account.uid) : null;
+  const myUid = data.account ? String(data.account.uid) : null;
   for (const e of entries) {
     const tr = document.createElement("tr");
-    const me = Number(e.uid) === myUid;
+    const me = String(e.uid) === myUid;
     const topTag = Number(e.rank) === 1 ? `<span class="tag top">榜一</span>` : "";
     tr.innerHTML =
       `<td>${labels[e.type] || e.type}</td>` +
@@ -429,15 +429,18 @@ function bind() {
     let text = $("impListText").value.trim();
     if (file) text = await file.text();
     if (!text) return toast("请选择文件或粘贴 JSON", "bad");
-    let data;
+    // ★ 这里只做语法校验，绝不把解析结果发给后端：
+    //   uid 是 19 位数，超过 JS 的 2^53 安全整数，JSON.parse 会把它舍入
+    //   （1565050802521812992 → 1565050802521813000），后端就会存下假的 uid。
+    //   原文交给 Python 的 json 解析才精确。
     try {
-      data = JSON.parse(text);
+      JSON.parse(text);
     } catch (e) {
       return toast(`JSON 解析失败：${e.message}`, "bad");
     }
     const out = await act("导入账号列表", () =>
       api("/api/accounts/import", "POST", {
-        data,
+        data: text,
         select: $("impSelectChk").checked,
       }));
     if (out) {
@@ -517,10 +520,10 @@ function bind() {
       tb.innerHTML = `<tr><td colspan="7" class="muted">无数据</td></tr>`;
       return;
     }
-    const myUid = out.account ? Number(out.account.uid) : null;
+    const myUid = out.account ? String(out.account.uid) : null;
     for (const e of entries) {
       const tr = document.createElement("tr");
-      const me = Number(e.uid) === myUid;
+      const me = String(e.uid) === myUid;
       const topTag = e.rank === 1 ? ` <span class="tag top">榜一</span>` : "";
       tr.innerHTML =
         `<td>${e.rank}</td>` +

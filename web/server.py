@@ -160,6 +160,26 @@ def uptime_info():
     sec = int(time.time() - STARTED_AT)
     return {"seconds": sec, "text": fmt_uptime(sec), "started_at": STARTED_STR}
 
+
+# JS 的 Number 只有 53 位精度，像 uid=1565050802521812992 这种 19 位数会被
+# JSON.parse 四舍五入成 1565050802521813000 —— 之前那批「影子账号」就是这么来的：
+# 浏览器把取整后的 uid 回传给后端，后端就存下了一个不存在的账号。
+# 所以所有超过 2^53 的整数，一律以字符串形式下发。
+JS_MAX_SAFE_INT = 2 ** 53
+
+
+def json_safe(obj):
+    """把超出 JS 安全整数范围的 int 转成字符串（递归处理 dict/list）。"""
+    if isinstance(obj, bool) or obj is None:
+        return obj
+    if isinstance(obj, int):
+        return str(obj) if abs(obj) > JS_MAX_SAFE_INT else obj
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return obj
+
 # 账号存储后端：启用数据库时指向 account_db 模块，否则 None（用 accounts.json）
 DB_BACKEND = None
 # 数据库启用失败的诊断信息（会在页面横幅和 /api/state 里显示，不用翻日志）
@@ -1637,7 +1657,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- helpers ----
     def _send_json(self, obj, status=200):
-        blob = json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
+        blob = json.dumps(json_safe(obj), ensure_ascii=False,
+                          default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(blob)))
