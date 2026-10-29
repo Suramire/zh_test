@@ -679,6 +679,7 @@ function bindCounter() {
 // 开关 / 建号 / 查榜 / jump 全在 Python 后台线程里跑，页面只负责展示和触发。
 let autoRankState = { enabled: false, tasks: [], logs: [] };
 let autoRankTimer = null;
+let autoRankBannedSeq = 0;   // 服务端删号事件序号：变了就刷新账号列表
 
 function fmtLeft(sec) {
   const t = Math.max(0, Math.floor(sec));
@@ -690,6 +691,20 @@ function fmtLeft(sec) {
 function renderAutoRank(d) {
   if (!d) return;
   autoRankState = d;
+
+  // 服务端判「帐号异常」会自动删号：这里提示一句并把账号下拉/当前账号刷新掉
+  if (d.banned_seq && d.banned_seq !== autoRankBannedSeq) {
+    const first = autoRankBannedSeq === 0;
+    const ev = (d.banned_events || [])[d.banned_events.length - 1];
+    autoRankBannedSeq = d.banned_seq;
+    if (!first && ev) {
+      toast(ev.ok
+        ? `帐号 ${ev.nick || ev.uid} 被判定异常，已从数据库删除`
+        : `帐号 ${ev.nick || ev.uid} 被判定异常，删除失败：${ev.detail || "-"}`,
+        ev.ok ? "" : "bad");
+    }
+    if (!first) refresh().catch(() => {});
+  }
 
   const tag = $("autoRankTag");
   if (tag) {

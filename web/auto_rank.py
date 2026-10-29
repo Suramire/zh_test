@@ -149,6 +149,12 @@ def my_values(entries, uid):
     return vals
 
 
+def is_banned_error(err):
+    """登录失败是否是服务端判定的「帐号异常」（cmd=255）。"""
+    msg = str(err)
+    return "登录被拒绝" in msg or "帐号异常" in msg
+
+
 def in_window(end_ms, now_ms=None):
     """是否处在「截止前 10 分钟」窗口内。"""
     try:
@@ -167,6 +173,7 @@ class AutoRank:
         self.db_sync = db_sync           # 建号后显式落库并回读校验的回调（server 注入）
         self.pvp_time = pvp_time         # CMD48 竞技场时间（server 注入）
         self.arena_rank = arena_rank     # CMD24 竞技场排行榜（server 注入）
+        self.on_banned = None            # 帐号异常时删号的回调（server 注入）
         self.mu = threading.RLock()      # 保护下面的状态字段
         self.enabled = False
         self.running = False
@@ -179,6 +186,7 @@ class AutoRank:
         self.next_sprint_tick = None
         self.last_error = None
         self.logs = deque(maxlen=LOG_LIMIT)
+        self.banned = set()              # 已被服务端判「帐号异常」并删掉的 uid
         self.wb_done = set()             # "uid:end_ms" 已上报过魔王伤害
         self.arena_pushed = {}           # "uid:end_ms" -> 上次推分时间
         self.thread = threading.Thread(target=self._loop, name="auto-rank", daemon=True)
@@ -411,8 +419,13 @@ class AutoRank:
         try:
             with self.lock, redirect_stdout(buf), redirect_stderr(buf):
                 acc = m.register()
-                lg = m.login(acc["userName"], acc["passwd"],
-                             acc.get("nickName") or acc["userName"])
+                try:
+                    lg = m.login(acc["userName"], acc["passwd"],
+                                 acc.get("nickName") or acc["userName"])
+                except Exception as e:
+                    if is_banned_error(e):
+                        self._drop_banned(acc, e)
+                    raise
                 acc.update({"sid": int(lg["sid"]),
                             "servertime": lg.get("servertime", 0)})
                 if lg.get("otherName"):
@@ -467,6 +480,8 @@ class AutoRank:
         """某一天创建的所有账号（手动建的也包含），按创建时间升序。"""
         out = []
         for uid, acc in self._pool().items():
+            if str(acc.get("uid") or uid) in self.banned:
+                continue
             if created_day(acc) != day:
                 continue
             out.append({
@@ -501,6 +516,25 @@ class AutoRank:
             "last": t.get("last") or "",
         }
 
+    def _drop_banned(self, acc, err):
+        """服务端判「帐号异常」：从账号库删除，并立刻从任务表里摘掉这个号。"""
+        uid = str(acc.get("uid") or "")
+        nick = str(acc.get("nickName") or "")
+        self.banned.add(uid)
+        res = (self.on_banned(acc) if self.on_banned
+               else {"ok": False, "detail": "删号回调未注入"})
+        if res.get("ok"):
+            self._log(f"✗ {nick}（uid={uid}）被服务端判定「帐号异常」，"
+                      f"已从数据库删除（{res.get('detail')}）")
+        else:
+            self._log(f"✗ {nick}（uid={uid}）被服务端判定「帐号异常」，"
+                      f"删除失败：{res.get('detail')}（本次先跳过该号）")
+        with self.mu:
+            for t in self.tasks:
+                t["accounts"] = [a for a in (t.get("accounts") or [])
+                                 if str(a.get("uid")) != uid]
+        return res
+
     def _pass_task(self, task, full):
         day = task["day"]
         accs = task["accounts"]
@@ -517,8 +551,12 @@ class AutoRank:
                 return
             except Exception as e:
                 msg = str(e) or type(e).__name__
-                task["last"] = f"异常：{msg}"
-                self._log(f"[{day}] {acc['nick']} 异常：{msg} → 切换下一个账号")
+                if is_banned_error(e):
+                    task["last"] = f"{acc['nick']} 帐号异常，已删除"
+                    self._log(f"[{day}] {acc['nick']} 帐号异常已删除 → 切换下一个账号")
+                else:
+                    task["last"] = f"异常：{msg}"
+                    self._log(f"[{day}] {acc['nick']} 异常：{msg} → 切换下一个账号")
                 task["index"] += 1
                 continue
             task["last"] = result
@@ -537,8 +575,13 @@ class AutoRank:
                 if not acc:
                     raise RuntimeError("账号库里已找不到该 uid")
 
-                lg = m.login(acc["userName"], acc["passwd"],
-                             acc.get("nickName") or acc["userName"])
+                try:
+                    lg = m.login(acc["userName"], acc["passwd"],
+                                 acc.get("nickName") or acc["userName"])
+                except Exception as e:
+                    if is_banned_error(e):
+                        self._drop_banned(acc, e)
+                    raise
                 acc.update({"sid": int(lg["sid"]),
                             "servertime": lg.get("servertime", 0)})
                 if lg.get("otherName"):

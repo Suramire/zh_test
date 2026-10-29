@@ -379,6 +379,28 @@ def get_account(uid):
     return _row_to_acc(row) if row else None
 
 
+def delete_account(uid):
+    """删除一个账号（服务端判「帐号异常」时清理用）。返回 True 表示确实删了一行。
+
+    ★ 只删这一行，不做全表 DELETE；如果删的正好是 current_uid，顺手把它清掉，
+      下次 load_doc 会自动回退到最近更新的账号。
+    """
+    uid = int(uid)
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM `{TABLE}` WHERE `uid`=%s", (uid,))
+            deleted = cur.rowcount > 0
+            cur.execute(f"SELECT `v` FROM `{META}` WHERE `k`='current_uid'")
+            row = cur.fetchone()
+            if row and str(row.get("v")) == str(uid):
+                cur.execute(f"DELETE FROM `{META}` WHERE `k`='current_uid'")
+        conn.commit()
+    finally:
+        conn.close()
+    return deleted
+
+
 def sync_from_json(path, force=False):
     """把 accounts.json 导入数据库。表里已有数据时默认跳过（force=True 覆盖）。"""
     if not os.path.exists(path):

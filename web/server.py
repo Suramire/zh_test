@@ -74,6 +74,7 @@ import traceback
 import urllib.request
 import zipfile
 import zlib
+from collections import deque
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -380,6 +381,53 @@ def db_sync_account(acc):
 
 # 自动刷榜建号后显式同步到数据库（回调在运行时才用到，DB_BACKEND 那时已确定）
 AUTO_RANK.db_sync = db_sync_account
+
+
+# 服务端判定「帐号异常」后自动删号：事件留给前端轮询，用来提示 + 刷新账号列表
+BANNED_EVENTS = deque(maxlen=50)
+BANNED_SEQ = [0]
+
+
+def drop_banned_account(acc):
+    """账号被服务端判「帐号异常」→ 从数据库（没有数据库时从账号文件）删除。
+
+    返回 {"ok", "detail"}；每次调用都会记一条事件（banned_seq 自增），
+    前端轮询 /api/autorank/status 时发现 seq 变了就刷新账号列表。
+    """
+    uid = str((acc or {}).get("uid") or "").strip()
+    nick = str((acc or {}).get("nickName") or "").strip()
+    if not uid:
+        return {"ok": False, "detail": "缺少 uid"}
+    ok, detail = False, ""
+    try:
+        if not DB_BACKEND:
+            ensure_db_store()
+        if DB_BACKEND:
+            ok = DB_BACKEND.delete_account(int(uid))
+            detail = f"MySQL/{DB_BACKEND.TABLE}" + ("" if ok else "（库里没有该行）")
+        else:
+            doc = m._load_account_doc() or {}
+            accounts = doc.get("accounts") or {}
+            if str(uid) in accounts:
+                accounts.pop(str(uid))
+                if str(doc.get("current")) == str(uid):
+                    doc["current"] = None
+                m._save_account_doc(doc)
+                ok = True
+            detail = store_label() + ("" if ok else "（文件里没有该账号）")
+    except Exception as e:
+        detail = f"{type(e).__name__}: {e}"
+    BANNED_SEQ[0] += 1
+    BANNED_EVENTS.append({
+        "seq": BANNED_SEQ[0], "uid": uid, "nick": nick, "ok": bool(ok),
+        "detail": detail,
+        "at": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    print(f"  · 帐号异常自动删号 uid={uid} nick={nick} ok={ok} {detail}")
+    return {"ok": bool(ok), "detail": detail}
+
+
+AUTO_RANK.on_banned = drop_banned_account
 
 
 # 启动时连不上数据库的话，后续请求里每 30 秒重试一次（TiDB Serverless 冷启动、
@@ -1981,6 +2029,8 @@ class Handler(BaseHTTPRequestHandler):
             # 自动刷榜状态 + 最近日志，纯内存，前端每 3 秒轮询
             data = AUTO_RANK.status()
             data["store"] = store_label()
+            data["banned_seq"] = BANNED_SEQ[0]
+            data["banned_events"] = list(BANNED_EVENTS)[-10:]
             self._send_json({"ok": True, "data": data, "logs": [], "error": None})
             return
 
