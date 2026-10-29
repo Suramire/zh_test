@@ -30,7 +30,7 @@ function setBusy(on) {
   busyCount += on ? 1 : -1;
   if (busyCount < 0) busyCount = 0;
   document.querySelectorAll("button").forEach((b) => {
-    if (b.id === "btnClearLog" || b.id === "btnExportLog" || b.id === "btnCounter") return;
+    if (b.id === "btnClearLog" || b.id === "btnExportLog" || b.id === "btnCounter" || b.id === "btnCounterReset") return;
     b.disabled = busyCount > 0;
   });
 }
@@ -589,61 +589,89 @@ function esc(s) {
   }[c]));
 }
 
-// ───────────── 定时计数器 ─────────────
-// 点「开始计数」后每 1 分钟 +1，再点一次停止；计数按开始时间戳推算，不受定时器漂移影响
-const COUNTER_INTERVAL_MS = 60 * 1000;
-let counterRunning = false;
-let counterBase = 0; // 本轮开始时的计数
-let counterStartTs = 0; // 本轮开始的本地时间戳
-let counterTimer = null;
-
-function counterValue() {
-  if (!counterRunning) return counterBase;
-  return counterBase + Math.floor((Date.now() - counterStartTs) / COUNTER_INTERVAL_MS);
-}
+// ───────────── 定时计数器（服务端进程内计时） ─────────────
+// 计数状态存在 Python 服务里，刷新页面不重置；前端只按服务端给的
+// seconds_to_next 本地走秒，每 10 秒跟服务端校准一次。
+let counterState = { running: false, count: 0, interval: 60, nextAt: 0 };
+let counterTick = null;
+let counterSync = null;
 
 function fmtCountdown(ms) {
   const t = Math.max(0, Math.ceil(ms / 1000));
   return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
 }
 
+function applyCounter(d) {
+  counterState.running = !!d.running;
+  counterState.count = Number(d.count) || 0;
+  counterState.interval = Number(d.interval) || 60;
+  counterState.nextAt = d.running && d.seconds_to_next != null
+    ? Date.now() + Number(d.seconds_to_next) * 1000
+    : 0;
+  renderCounter();
+}
+
 function renderCounter() {
-  const val = counterValue();
+  // 本地按时间戳推进计数，避免倒计时显示和计数不一致
+  if (counterState.running && counterState.nextAt) {
+    const step = counterState.interval * 1000;
+    while (Date.now() >= counterState.nextAt) {
+      counterState.count += 1;
+      counterState.nextAt += step;
+    }
+  }
+  const val = counterState.count;
   $("counterValue").textContent = val;
-  $("btnCounter").textContent = counterRunning ? "停止计数" : "开始计数";
-  if (counterRunning) {
-    const elapsed = (Date.now() - counterStartTs) % COUNTER_INTERVAL_MS;
+  $("btnCounter").textContent = counterState.running ? "停止计数" : "开始计数";
+  if (counterState.running) {
     $("counterState").textContent =
-      `运行中 · 每 1 分钟 +1 · 距下次 +1 还有 ${fmtCountdown(COUNTER_INTERVAL_MS - elapsed)}`;
+      `运行中 · 每 ${counterState.interval} 秒 +1 · 距下次 +1 还有 ` +
+      `${fmtCountdown(counterState.nextAt - Date.now())}（服务端计时，刷新不重置）`;
   } else {
-    $("counterState").textContent = `已停止 · 当前计数 ${val}，点「开始计数」继续累加`;
+    $("counterState").textContent =
+      `已停止 · 当前计数 ${val}（服务端计时，刷新不重置）`;
   }
 }
 
-function startCounter() {
-  if (counterRunning) return;
-  counterRunning = true;
-  counterStartTs = Date.now();
-  counterTimer = setInterval(renderCounter, 500);
-  renderCounter();
-  toast("计数器已开始，每 1 分钟 +1", "ok");
+async function syncCounter() {
+  try {
+    const res = await fetch("/api/counter/status", { cache: "no-store" });
+    const j = await res.json();
+    if (j && j.ok && j.data) applyCounter(j.data);
+  } catch (e) {
+    /* 网络抖动不影响页面，下一轮再校准 */
+  }
 }
 
-function stopCounter() {
-  if (!counterRunning) return;
-  counterBase = counterValue();
-  counterRunning = false;
-  clearInterval(counterTimer);
-  counterTimer = null;
-  renderCounter();
-  toast(`计数器已停止，共 ${counterBase} 次`, "");
+async function toggleCounter() {
+  const path = counterState.running ? "/api/counter/stop" : "/api/counter/start";
+  const out = await act(counterState.running ? "停止计数" : "开始计数",
+    () => api(path, "POST", {}));
+  if (!out) return;
+  applyCounter(out);
+  toast(out.running
+    ? `计数器已开始（服务端运行），当前 ${out.count} 次`
+    : `计数器已停止，共 ${out.count} 次`, "ok");
+}
+
+async function resetCounter() {
+  const out = await act("计数器清零", () => api("/api/counter/reset", "POST", {}));
+  if (!out) return;
+  applyCounter(out);
+  toast("计数器已清零", "ok");
 }
 
 function bindCounter() {
   const btn = $("btnCounter");
   if (!btn) return;
-  btn.onclick = () => (counterRunning ? stopCounter() : startCounter());
-  renderCounter();
+  btn.onclick = toggleCounter;
+  $("btnCounterReset").onclick = resetCounter;
+  syncCounter().then(() => {
+    clearInterval(counterTick);
+    counterTick = setInterval(renderCounter, 250);
+    clearInterval(counterSync);
+    counterSync = setInterval(syncCounter, 10000);
+  });
 }
 
 // ───────────── 服务运行时长（右上角） ─────────────

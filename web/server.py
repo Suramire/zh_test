@@ -48,6 +48,10 @@ API
     GET  /api/save/export?chapter=&open_switches=&uid=
                                        导出下载 zip（soco.bin + NetData.bin），不落盘
     GET  /api/logs?uid=&limit=          最近操作日志（内存）
+    GET  /api/counter/status            定时计数器状态（服务端进程内，刷新页面不重置）
+    POST /api/counter/start             开始计数（每 60 秒 +1）
+    POST /api/counter/stop              停止计数（保留当前值）
+    POST /api/counter/reset             停止并清零
 """
 import argparse
 import base64
@@ -159,6 +163,77 @@ def fmt_uptime(seconds):
 def uptime_info():
     sec = int(time.time() - STARTED_AT)
     return {"seconds": sec, "text": fmt_uptime(sec), "started_at": STARTED_STR}
+
+
+# ───────────── 定时计数器（状态放在服务端进程里） ─────────────
+# 计数不放在浏览器里：刷新页面、换标签页、换设备都接着走，只有服务进程重启才归零。
+# 计数按「开始时刻 + 已过时间」推算，不靠后台线程累加，因此不会因线程漂移丢秒。
+COUNTER_INTERVAL = 60.0
+COUNTER_LOCK = threading.Lock()
+COUNTER = {"running": False, "base": 0, "started_at": None}
+
+
+def counter_count(now=None):
+    now = time.time() if now is None else now
+    st = COUNTER
+    if not st["running"] or st["started_at"] is None:
+        return int(st["base"])
+    return int(st["base"] + (now - st["started_at"]) // COUNTER_INTERVAL)
+
+
+def counter_info():
+    now = time.time()
+    with COUNTER_LOCK:
+        running = bool(COUNTER["running"])
+        count = counter_count(now)
+        next_in = None
+        if running and COUNTER["started_at"] is not None:
+            elapsed = (now - COUNTER["started_at"]) % COUNTER_INTERVAL
+            next_in = round(COUNTER_INTERVAL - elapsed, 3)
+        return {
+            "running": running,
+            "count": count,
+            "interval": int(COUNTER_INTERVAL),
+            "seconds_to_next": next_in,      # None = 已停止
+            "server_time": now,
+            "process_uptime": int(now - STARTED_AT),
+        }
+
+
+def api_counter_status(_body=None):
+    return counter_info()
+
+
+def api_counter_start(_body=None):
+    now = time.time()
+    with COUNTER_LOCK:
+        if not COUNTER["running"]:
+            COUNTER["base"] = counter_count(now)
+            COUNTER["started_at"] = now
+            COUNTER["running"] = True
+    info = counter_info()
+    print(f"[counter] 开始计数：当前 {info['count']}，每 {info['interval']} 秒 +1")
+    return info
+
+
+def api_counter_stop(_body=None):
+    now = time.time()
+    with COUNTER_LOCK:
+        if COUNTER["running"]:
+            COUNTER["base"] = counter_count(now)
+            COUNTER["running"] = False
+            COUNTER["started_at"] = None
+    info = counter_info()
+    print(f"[counter] 停止计数：共 {info['count']} 次")
+    return info
+
+
+def api_counter_reset(_body=None):
+    with COUNTER_LOCK:
+        COUNTER.update({"running": False, "base": 0, "started_at": None})
+    print("[counter] 计数已清零")
+    return counter_info()
+
 
 
 # JS 的 Number 只有 53 位精度，像 uid=1565050802521812992 这种 19 位数会被
@@ -1635,6 +1710,9 @@ ROUTES = {
     ("POST", "/api/worldboss/damage"): api_worldboss_damage,
     ("POST", "/api/worldboss/status"): api_worldboss_status,
     ("POST", "/api/worldboss/rank"): api_worldboss_rank,
+    ("POST", "/api/counter/start"): api_counter_start,
+    ("POST", "/api/counter/stop"): api_counter_stop,
+    ("POST", "/api/counter/reset"): api_counter_reset,
 }
 
 QUERY_ROUTES = {
@@ -1825,6 +1903,12 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/api/uptime",):
             # 前端每秒轮询一次，不进日志、不查数据库，纯内存计算
             self._send_json({"ok": True, "data": uptime_info(),
+                             "logs": [], "error": None})
+            return
+
+        if path in ("/api/counter/status",):
+            # 同上：前端每秒校准一次，纯内存，不碰数据库
+            self._send_json({"ok": True, "data": counter_info(),
                              "logs": [], "error": None})
             return
 
