@@ -137,6 +137,67 @@ LOCK = threading.RLock()
 LOG_RING = []
 MAX_RING = 300
 
+# 账号存储后端：启用数据库时指向 account_db 模块，否则 None（用 accounts.json）
+DB_BACKEND = None
+
+
+def _install_db_store():
+    """把 offline_play 的账号读写切成数据库实现（不动 offline_play 本身）。
+
+    只替换三个底层函数 —— `save_account` / `load_saved_account` / `_load_account_pool`
+    等上层逻辑全都基于它们，换掉即可全局生效。
+    数据库没配置 / 驱动没装 / 连不上时，一律安静地退回 accounts.json。
+    """
+    global DB_BACKEND
+    try:
+        import account_db as db
+    except Exception as e:  # 模块本身有问题也不能拖垮服务
+        print(f"  · 账号存储：accounts.json（account_db 未加载：{e}）")
+        return None
+    if not db.config():
+        print("  · 账号存储：accounts.json（未配置数据库）")
+        return None
+    if not db.enabled():
+        print("  ! 已配置数据库但缺少 PyMySQL 驱动，本次退回 accounts.json")
+        print("    安装：python3 -m pip install PyMySQL")
+        return None
+    try:
+        db.ensure_schema()
+        st = db.stats()
+    except Exception as e:
+        print(f"  ! 数据库不可用，退回 accounts.json：{type(e).__name__}: {e}")
+        return None
+
+    orig_from_file = m._account_from_file
+
+    def _db_account_from_file(path=None):
+        # 只有「读当前账号」走数据库；导入用的其它 json 文件仍按文件读
+        if path and os.path.abspath(path) != os.path.abspath(m.ACCOUNT_FILE):
+            return orig_from_file(path)
+        doc = db.load_doc()
+        accounts = doc["accounts"]
+        cur = doc.get("current")
+        if cur and str(cur) in accounts:
+            return accounts[str(cur)]
+        if len(accounts) == 1:
+            return next(iter(accounts.values()))
+        return None
+
+    m._load_account_doc = db.load_doc
+    m._save_account_doc = db.save_doc
+    m._account_from_file = _db_account_from_file
+    DB_BACKEND = db
+    print(f"  · 账号存储：MySQL {db.describe()}"
+          f"（{st['accounts']} 个账号，表 {db.TABLE}）")
+    return db
+
+
+def store_label():
+    """日志里显示的存储位置。"""
+    if DB_BACKEND:
+        return f"MySQL/{DB_BACKEND.TABLE}"
+    return rel(m.ACCOUNT_FILE)
+
 
 # ─────────────────────────────────────
 #  基础工具
@@ -334,10 +395,13 @@ def api_state(_body=None):
         "paths": {"root": ROOT,
                   "accounts": rel(ACCOUNTS_DIR),
                   "data_dir": rel(DATA_DIR),
-                  "account_file": rel(m.ACCOUNT_FILE)},
+                  "account_file": store_label()},
         "storage": {"dir": rel(DATA_DIR), "source": DATA_DIR_SOURCE,
                     "persistent": data_persistent(),
-                    "account_file_exists": os.path.exists(m.ACCOUNT_FILE)},
+                    "backend": "mysql" if DB_BACKEND else "json",
+                    "store": store_label(),
+                    "account_file_exists": (True if DB_BACKEND
+                                            else os.path.exists(m.ACCOUNT_FILE))},
     }
 
 
@@ -353,7 +417,7 @@ def api_register(_body=None):
 
     # ★ 账号密码 uid 同步写进唯一账号文件，并设为当前账号
     rec = m.save_account(acc, make_current=True, source="web-register")
-    print(f"  ✓ 已写入 {rel(m.ACCOUNT_FILE)} 并设为当前账号"
+    print(f"  ✓ 已写入 {store_label()} 并设为当前账号"
           f"（共 {len(m._load_account_pool())} 个账号）")
 
     d = account_dir(acc["uid"])
@@ -412,7 +476,7 @@ def api_account_import(body):
         acc["nickName"] = lg.get("otherName") or acc["nickName"]
         print(f"  ✓ 登录校验通过 uid={acc['uid']}")
     rec = m.save_account(acc, make_current=True, source="web-import")
-    print(f"  ✓ 已导入账号 uid={acc['uid']} user={user} -> {rel(m.ACCOUNT_FILE)}")
+    print(f"  ✓ 已导入账号 uid={acc['uid']} user={user} -> {store_label()}")
     return {"current": public_account(rec)}
 
 
@@ -443,7 +507,7 @@ def api_account_nickname(body):
 
     acc["nickName"] = name
     m.save_account(acc, make_current=True, source="web-nick")
-    print(f"  ✓ 已更新 {rel(m.ACCOUNT_FILE)} 里的 nickName")
+    print(f"  ✓ 已更新 {store_label()} 里的 nickName")
     return {"account": public_account(acc), "nickName": name}
 
 
@@ -1615,16 +1679,18 @@ def main():
         pass
 
     m.migrate_current_account()
+    _install_db_store()
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print("=" * 60)
     print("  zhaohe 脱机工具 Web 服务")
     print(f"  http://127.0.0.1:{args.port}")
     print(f"  项目目录: {ROOT}")
     print(f"  数据目录: {rel(DATA_DIR)}  （来源: {DATA_DIR_SOURCE}）")
-    if not data_persistent():
+    if not data_persistent() and not DB_BACKEND:
         print("  ⚠ 该目录【不可持久化】：重新部署/休眠唤醒后账号数据会丢失。")
         print("    解决：在平台挂一个持久磁盘并设 ZHAOHE_DATA_DIR 指向挂载点（如 /var/data）。")
-    print(f"  账号文件: {rel(m.ACCOUNT_FILE)}")
+    print(f"  账号存储: {store_label()}"
+          + ("（账号数据已走数据库，不再依赖本地文件）" if DB_BACKEND else ""))
     print(f"  内嵌模板: 内存 {TEMPLATE_SIZE} 字节（不落盘）")
     print(f"  访问认证: {'已开启 Basic Auth' if auth_spec() else '未开启（仅建议内网/本机使用）'}")
     print("=" * 60)

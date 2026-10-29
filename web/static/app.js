@@ -129,7 +129,8 @@ function renderStorage(st) {
     el.hidden = true;
     return;
   }
-  if (st.persistent) {
+  // 账号走数据库时不依赖本地磁盘，不会因为重新部署丢数据
+  if (st.backend === "mysql" || st.persistent) {
     el.hidden = true;
     return;
   }
@@ -137,7 +138,8 @@ function renderStorage(st) {
   el.innerHTML =
     `⚠ 数据目录 <b>${esc(st.dir)}</b> 不是持久盘：平台重新部署或休眠唤醒后，` +
     `导入的账号会丢失。<br>解决办法：给服务挂一个持久磁盘，并把环境变量 ` +
-    `<code>ZHAOHE_DATA_DIR</code> 指向挂载点（如 <code>/var/data</code>）。`;
+    `<code>ZHAOHE_DATA_DIR</code> 指向挂载点（如 <code>/var/data</code>）；` +
+    `或者配置数据库（<code>ZHAOHE_DB_HOST</code>）把账号存到 MySQL。`;
 }
 
 function renderTemplate(t) {

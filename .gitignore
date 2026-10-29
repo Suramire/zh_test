@@ -3,6 +3,10 @@ accounts.json
 accounts/
 offline_account.json
 
+# 数据库连接信息同样绝不进仓库（含明文密码）
+db.local.json
+*.db.local.json
+
 # 运行时杂物
 __pycache__/
 *.py[cod]
