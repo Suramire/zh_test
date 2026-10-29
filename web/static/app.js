@@ -267,6 +267,9 @@ function bind() {
     if (out) {
       await refresh();
       await loadFiles(out.current.uid);
+    } else {
+      // 多半是页面上的列表已经过期（账号被删/换库/服务重启过），拉一次新的
+      await refresh();
     }
   };
 
@@ -590,8 +593,14 @@ async function syncUptime() {
     const res = await fetch("/api/uptime", { cache: "no-store" });
     const j = await res.json();
     if (j && j.ok && j.data) {
+      const prev = upSec;
       upSec = j.data.seconds;
       upTs = Date.now();
+      // 运行时长突然往回跳 = 服务重启过，页面上的账号列表/状态都是旧的，直接刷新
+      if (prev != null && upSec + 5 < prev && busyCount === 0) {
+        toast("服务已重启，正在刷新页面…", "");
+        setTimeout(() => location.reload(), 800);
+      }
     }
   } catch (e) {
     /* 网络抖动不影响页面 */

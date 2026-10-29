@@ -542,7 +542,11 @@ def api_account_select(body):
     pool = m._load_account_pool()
     rec = pool.get(uid)
     if not rec:
-        raise RuntimeError(f"账号文件里没有 uid={uid}")
+        # 常见于「页面是旧的」：换库 / 删过账号 / 服务重启后没刷新
+        names = "、".join(f"{k}" for k in list(pool)[:6]) or "（空）"
+        raise RuntimeError(
+            f"账号库里没有 uid={uid}（当前共 {len(pool)} 个：{names}）。"
+            f"页面上的列表可能已过期，刷新页面后再选")
     m.save_account(rec, make_current=True, source="web-select")
     print(f"  ✓ 当前账号已切换 -> uid={uid}  nick={rec.get('nickName')}")
     return {"current": public_account(rec)}
