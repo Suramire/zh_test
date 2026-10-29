@@ -199,6 +199,16 @@ def build_body(sid, user, passwd, other, lang, device, s_session_id=0, counter=1
     return b
 
 
+def _err255_text(body):
+    """解析 cmd=255 错误包的文本（UTF-16BE）；解不出来就返回原始 hex。"""
+    try:
+        n = int.from_bytes(body[1:3], "big")
+        txt = body[3:3 + n * 2].decode("utf-16-be")
+        return txt or body.hex()
+    except Exception:
+        return body.hex()
+
+
 def send_cmd1(sid, user, passwd, other, lang=0, device=None, s_session_id=0,
               counter=1, timeout=10):
     dev = dict(DEFAULT_DEVICE)
@@ -221,6 +231,10 @@ def send_cmd1(sid, user, passwd, other, lang=0, device=None, s_session_id=0,
 
     (count, length) = struct.unpack_from(">II", data, 0)
     body_resp = data[8:8 + length]
+    # ★ cmd=255 是服务端的错误包：body = ff [Short]字符数 [UTF-16BE 文本]，
+    #   例如「帐号异常，请联系客服!」= 账号被风控/封禁，重试没有任何意义。
+    if body_resp and body_resp[0] == 255:
+        raise RuntimeError(f"登录被拒绝：{_err255_text(body_resp)}")
     # ★ 正常回包 = 1 + 8*3 + 4 个 UTF 串（实测 127B）。只回 25B 时说明服务端只发了
     #   头部（uid/sid/servertime）就断了 —— 常见于同账号并发登录或服务端抖动，
     #   直接解下去会抛「unpack_from requires a buffer of at least 27 bytes」，看不懂。

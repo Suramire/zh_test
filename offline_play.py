@@ -227,6 +227,9 @@ def login(user, passwd, other, timeout=20):
     try:
         code, info = S1.send_cmd1(0, user, passwd, other, lang=0, timeout=timeout)
     except Exception as e:
+        msg = str(e)
+        if msg.startswith("登录被拒绝"):     # cmd=255 风控/封号：别再包一层，重试也没用
+            raise RuntimeError(msg)
         raise RuntimeError(f"登录异常: {type(e).__name__}: {e}")
     if not isinstance(info, dict) or not info.get("sid"):
         raise RuntimeError(f"登录失败: {info}")

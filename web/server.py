@@ -554,7 +554,9 @@ def login_current(retries=3):
             break
         except Exception as e:
             msg = str(e)
-            transient = "登录回包异常" in msg or "登录异常" in msg
+            # 「登录被拒绝」= cmd=255（帐号异常/封禁），重试只会加深风控，直接抛
+            transient = ("登录被拒绝" not in msg
+                         and ("登录回包异常" in msg or "登录异常" in msg))
             if not transient or attempt >= retries:
                 raise
             wait = 1.2 * attempt
