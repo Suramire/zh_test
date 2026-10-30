@@ -552,7 +552,7 @@ function bind() {
     if (out) await loadFiles(out.account.uid);
   };
 
-  $("btnExportSave").onclick = () => {
+  $("btnExportSave").onclick = async () => {
     const chapter = parseInt($("chapter").value, 10) || 10;
     const sw = $("switchesChk").checked ? 1 : 0;
     const uid = (STATE.current && STATE.current.uid) || "";
@@ -560,8 +560,21 @@ function bind() {
       + (uid ? `&uid=${uid}` : "") + `&_=${Date.now()}`;
     $("exportInfo").textContent =
       `正在生成第 ${chapter} 章存档${sw ? "（功能全开）" : ""}，稍后自动下载 zip ...`;
-    toast("开始生成并下载", "ok");
-    downloadFile(url);
+    setBusy(true);
+    try {
+      await downloadZip(url, (info) => {
+        // 把服务端实际用的账号回显出来，避免「看起来都是同一个存档」
+        $("exportInfo").textContent =
+          `已导出 uid=${info.uid}（${info.nick || "-"}）　第 ${chapter} 章　` +
+          `soco.md5=${info.md5.slice(0, 12)}　${info.name}`;
+      });
+      toast("导出完成", "ok");
+    } catch (e) {
+      $("exportInfo").textContent = `导出失败：${e.message}`;
+      toast(`导出失败：${e.message}`, "bad");
+    } finally {
+      setBusy(false);
+    }
   };
 
   $("btnExportLog").onclick = () => {
@@ -582,6 +595,38 @@ function downloadFile(url) {
   document.body.appendChild(a);
   a.click();
   a.remove();
+}
+
+// 下载 zip 并读响应头（<a href> 读不到头，只能走 fetch）
+async function downloadZip(url, onInfo) {
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const j = await res.json();
+      msg = j.error || msg;
+    } catch (e) { /* 非 JSON */ }
+    throw new Error(msg);
+  }
+  const uid = res.headers.get("X-Zhaohe-Uid") || "";
+  let nick = "";
+  try {
+    nick = decodeURIComponent(res.headers.get("X-Zhaohe-Nick") || "");
+  } catch (e) { nick = ""; }
+  const md5 = res.headers.get("X-Zhaohe-Soco-Md5") || "";
+  const cd = res.headers.get("Content-Disposition") || "";
+  const m = /filename="([^"]+)"/.exec(cd);
+  const name = m ? m[1] : `zhaohe_${uid || "save"}.zip`;
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  if (onInfo) onInfo({ uid, nick, md5, name, size: blob.size });
+  return { uid, nick, md5, name, size: blob.size };
 }
 
 function esc(s) {

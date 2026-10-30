@@ -60,6 +60,7 @@ import argparse
 import base64
 import glob
 import gzip
+import hashlib
 import hmac
 import io
 import json
@@ -78,7 +79,7 @@ from collections import deque
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
@@ -1684,6 +1685,11 @@ def build_save_bytes(acc, chapter=10, open_switches=True):
     """用内嵌模板生成 soco.bin，返回 (bytes, info)。
 
     ★ 全程只在临时目录里操作，不写 accounts/<uid>/，也不碰本机任何绝对路径。
+
+    ★ 修复：旧实现只把 uid 写进模板，导致「换账号导出也是同一个存档」。
+      现在把该账号的昵称 / 等级也写进 soco.bin，让不同账号导出的内容真正不同。
+      昵称写入是可靠的（模板昵称为空 TC_STRING）；等级写入 best-effort，
+      模板/存档没有等级快照时跳过，不影响导出。
     """
     with tempfile.TemporaryDirectory(prefix="zhaohe_save_") as td:
         tpl = os.path.join(td, "template_soco.bin")
@@ -1691,6 +1697,31 @@ def build_save_bytes(acc, chapter=10, open_switches=True):
             f.write(template_blob())
         data, info = m.build_save(tpl, int(acc["uid"]), int(chapter), None,
                                   open_switches=bool(open_switches))
+
+        # 昵称（该账号真实昵称；模板里 playerName 为空串，写进去后各账号存档即不同）
+        name = (acc.get("nickName") or acc.get("userName") or "").strip()
+        if name:
+            try:
+                np = m.W.plan_playername_patch(data, name)
+                data = m.W.splice(data, np[3], np[4], np[5])
+                info["playerName"] = f"→ {name}"
+            except Exception as e:
+                info["playerName"] = f"（写入失败，跳过：{e}）"
+
+        # 等级（best-effort：模板无玩家等级快照时跳过）
+        lv = int(acc.get("playerLevel") or 0)
+        if lv > 0:
+            try:
+                off, ol, nb = m.W.plan_player_hero_level_patch(data, lv)
+                data = m.W.splice(data, off, ol, nb)
+                info["playerLevel"] = f"→ {lv}"
+            except Exception:
+                info["playerLevel"] = "（模板无等级字段，跳过）"
+
+        # 昵称/等级是可变长 splice，末尾统一重算 CRC
+        data = bytearray(data)
+        data[0:4] = zlib.crc32(bytes(data[4:])).to_bytes(4, "big")
+        data = bytes(data)
     return data, info
 
 
@@ -1730,7 +1761,9 @@ def netdata_bytes(acc):
 def api_save_export(query):
     """生成 soco.bin + NetData.bin 并打包成 zip 返回（不落地任何文件）。
 
-    返回 (zip_bytes, 文件名)
+    返回 (zip_bytes, 文件名, meta)
+    meta 里带 uid / 昵称 / 章节，用于响应头和页面回显 —— 导出到底用的是哪个账号，
+    一眼可查，避免「看起来都是同一个存档」的误会。
     """
     uid_q = (query.get("uid") or [None])[0]
     acc = require_account()
@@ -1743,7 +1776,8 @@ def api_save_export(query):
     sw = (query.get("open_switches") or ["1"])[0]
     open_switches = str(sw).lower() not in ("0", "false", "no", "")
 
-    print(f"[save-export] uid={acc['uid']} 章节={chapter} 打开开关={open_switches}")
+    print(f"[save-export] uid={acc['uid']} nick={acc.get('nickName')} "
+          f"章节={chapter} 打开开关={open_switches}")
     data, info = build_save_bytes(acc, chapter, open_switches)
     for k, v in info.items():
         print(f"  ✓ {k}: {v}")
@@ -1755,15 +1789,37 @@ def api_save_export(query):
     nd, nd_src = netdata_bytes(acc)
     print(f"  ✓ NetData.bin {len(nd)} 字节（{nd_src}）")
 
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    meta = {"uid": str(acc["uid"]), "nick": acc.get("nickName") or "",
+            "userName": acc.get("userName") or "",
+            "chapter": disp, "chapter_arg": chapter,
+            "open_switches": open_switches, "stamp": stamp,
+            "soco_md5": hashlib.md5(data).hexdigest(),
+            "netdata_md5": hashlib.md5(nd).hexdigest(),
+            "netdata_src": nd_src}
+    info_txt = "\n".join([
+        "zhaohe 存档导出",
+        f"生成时间 : {stamp}",
+        f"账号 uid : {meta['uid']}",
+        f"昵称     : {meta['nick']}",
+        f"userName : {meta['userName']}",
+        f"章节     : 第 {disp} 章（参数 chapter={chapter}）",
+        f"功能开关 : {'全开' if open_switches else '保持模板'}",
+        f"soco.bin   : {len(data)} 字节  md5={meta['soco_md5']}",
+        f"NetData.bin: {len(nd)} 字节  md5={meta['netdata_md5']}  来源={nd_src}",
+        "",
+        "把这个文件里的 uid / md5 和上一次导出的对比，就能确认是不是同一个账号的存档。",
+    ]) + "\n"
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("soco.bin", data)
         z.writestr("NetData.bin", nd)
+        z.writestr("info.txt", info_txt.encode("utf-8"))
     blob = buf.getvalue()
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = f"zhaohe_{acc['uid']}_{stamp}.zip"
     print(f"  ✓ 已打包 {name}（{len(blob)} 字节）")
-    return blob, name
+    return blob, name, meta
 
 
 def api_account_files(query):
@@ -1990,12 +2046,19 @@ class Handler(BaseHTTPRequestHandler):
                 cur = current_account()
                 uid = (query.get("uid") or [None])[0] or (cur.get("uid") if cur else None)
                 with LOCK, redirect_stdout(buf), redirect_stderr(buf):
-                    blob, name = api_save_export(query)
+                    blob, name, meta = api_save_export(query)
                 _append_op(uid, path, True, buf.getvalue().rstrip())
                 self.send_response(200)
                 self.send_header("Content-Type", "application/zip")
                 self.send_header("Content-Disposition",
                                  f'attachment; filename="{name}"')
+                # 回显本次导出实际用的账号，前端读头就能显示，不用猜
+                self.send_header("X-Zhaohe-Uid", meta["uid"])
+                self.send_header("X-Zhaohe-Nick",
+                                 quote(meta["nick"] or "", safe=""))
+                self.send_header("X-Zhaohe-Soco-Md5", meta["soco_md5"])
+                self.send_header("Access-Control-Expose-Headers",
+                                 "X-Zhaohe-Uid, X-Zhaohe-Nick, X-Zhaohe-Soco-Md5")
                 self.send_header("Content-Length", str(len(blob)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()

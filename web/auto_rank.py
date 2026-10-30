@@ -61,7 +61,14 @@ RANK_TYPE0_CAP = 14000             # 大选关榜上限
 WB_BONUS = (100, 200)              # 魔王目标 = 榜一 + 100~200
 ARENA_BONUS = (20, 100)            # 竞技场目标 = 非自己榜一 + 20~100
 ARENA_LV_DEFAULT = 158             # 与页面「匹配→取消」用的 lv 一致
-ARENA_REPUSH_SECONDS = 180         # 同一窗口内两次推分至少间隔 3 分钟
+ARENA_REPUSH_SECONDS = 180         # 已废弃：现在每期每号只推一次
+
+
+def arena_sprint_enabled():
+    """竞技场冲刺总开关：环境变量 ZHAOHE_ARENA_SPRINT=0 可整体关掉。"""
+    import os
+    return str(os.environ.get("ZHAOHE_ARENA_SPRINT", "1")).lower() \
+        not in ("0", "false", "no", "off")
 
 
 class DeadlineReached(RuntimeError):
@@ -244,6 +251,7 @@ class AutoRank:
                 "interval_seconds": RANK_TICK_SECONDS,
                 "sprint_interval_seconds": SPRINT_INTERVAL,
                 "sprint_window_seconds": SPRINT_WINDOW_MS // 1000,
+                "arena_sprint_enabled": arena_sprint_enabled(),
                 "batch_size": BATCH_SIZE,
                 "lookback_days": LOOKBACK_DAYS,
                 "tasks": [self._task_view(t) for t in tasks],
@@ -769,11 +777,13 @@ class AutoRank:
         if not t.get("ok"):
             task["arena"]["last"] = f"时间查询失败：{t.get('error')}"
             return "竞技场: 时间查询失败"
-        end_ms = int(t.get("end_time") or 0)      # 今日关闭时间
+        # ★ 用「赛季/榜单结束时间」（CMD48 endTime2，每周一 0 点）而不是「今日关闭时间」，
+        #   只在榜单结束前 10 分钟才冲，避免每天 23:00 都推分把分数越抬越高。
+        end_ms = int(t.get("season_end") or t.get("end_time") or 0)
         task["arena"]["end_time_ms"] = end_ms
         task["arena"]["end_time_text"] = m.format_end_time(end_ms)
         if not in_window(end_ms):
-            return "竞技场: 未到截止前 10 分钟"
+            return "竞技场: 未到榜单结束前 10 分钟"
 
         rk = self.arena_rank(sid, uid) if self.arena_rank else {"ok": False,
                                                               "error": "接口未注入"}
@@ -794,9 +804,14 @@ class AutoRank:
             return "竞技场: 已高于非自己榜一，跳过"
 
         key = f"{uid}:{end_ms}"
-        if time.time() - float(self.arena_pushed.get(key) or 0) < ARENA_REPUSH_SECONDS:
-            task["arena"]["last"] = "3 分钟内已推过分，等待下一轮复查"
-            return "竞技场: 3 分钟内已推过分"
+        # ★ 每期每个号只推一次：以前是「3 分钟内不重复」，10 分钟窗口里同一个号能推
+        #   3~4 次，每次 +20~100，几十个号叠起来分数就被抬得很高。现在窗口内一次即止。
+        if key in self.arena_pushed:
+            task["arena"]["last"] = "本期已经推过分，不再重复推"
+            return "竞技场: 本期已推过，跳过"
+        if not arena_sprint_enabled():
+            task["arena"]["last"] = "竞技场冲刺已关闭（ZHAOHE_ARENA_SPRINT=0）"
+            return "竞技场: 冲刺已关闭"
 
         target = top_score + random.randint(*ARENA_BONUS)
         name = acc.get("nickName") or acc.get("userName")
