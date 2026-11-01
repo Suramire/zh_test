@@ -3,10 +3,10 @@
 《召唤与合成》通用协议模拟器
 
 用法:
-  python3 zhaohe_protocol.py -c 21                       # CMD 21 公告(无额外参数)
-  python3 zhaohe_protocol.py -c 65 -p startDay:0 endDay:0  # CMD 65 排行榜
-  python3 zhaohe_protocol.py -c 65 -sid 1535356357681655808 -uid 1531416818877509632 -p startDay:0 endDay:0
-  python3 zhaohe_protocol.py -list                       # 列出所有协议
+  python3 zh_protocol.py -c 21                       # CMD 21 公告(无额外参数)
+  python3 zh_protocol.py -c 65 -p startDay:0 endDay:0  # CMD 65 排行榜
+  python3 zh_protocol.py -c 65 -sid 1535356357681655808 -uid 1531416818877509632 -p startDay:0 endDay:0
+  python3 zh_protocol.py -list                       # 列出所有协议
 
 协议规范(全大端):
   请求body: [long s_sessionId][int counter][byte CMD][请求字段按schema顺序]

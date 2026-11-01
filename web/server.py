@@ -86,7 +86,7 @@ os.chdir(ROOT)
 sys.path.insert(0, ROOT)
 
 import offline_play as m  # noqa: E402
-import zhaohe_protocol as P  # noqa: E402
+import zh_protocol as P  # noqa: E402
 
 # ── 数据目录 ──
 # 账号池与凭证目录都跟着 DATA_DIR 走，代码里不要再直接拼 ROOT/accounts。
@@ -1691,7 +1691,7 @@ def build_save_bytes(acc, chapter=10, open_switches=True):
       昵称写入是可靠的（模板昵称为空 TC_STRING）；等级写入 best-effort，
       模板/存档没有等级快照时跳过，不影响导出。
     """
-    with tempfile.TemporaryDirectory(prefix="zhaohe_save_") as td:
+    with tempfile.TemporaryDirectory(prefix="zh_save_") as td:
         tpl = os.path.join(td, "template_soco.bin")
         with open(tpl, "wb") as f:
             f.write(template_blob())
@@ -1749,7 +1749,7 @@ def netdata_bytes(acc):
         except OSError:
             continue
 
-    with tempfile.TemporaryDirectory(prefix="zhaohe_nd_") as td:
+    with tempfile.TemporaryDirectory(prefix="zh_nd_") as td:
         out = os.path.join(td, "NetData.bin")
         m.write_netdata(out, int(acc["uid"]), acc["userName"], acc["passwd"],
                         acc.get("nickName") or acc["userName"], template=tpl)
@@ -1817,7 +1817,7 @@ def api_save_export(query):
         z.writestr("NetData.bin", nd)
         z.writestr("info.txt", info_txt.encode("utf-8"))
     blob = buf.getvalue()
-    name = f"zhaohe_{acc['uid']}_{stamp}.zip"
+    name = f"zh_{acc['uid']}_{stamp}.zip"
     print(f"  ✓ 已打包 {name}（{len(blob)} 字节）")
     return blob, name, meta
 

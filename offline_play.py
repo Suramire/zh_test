@@ -117,7 +117,7 @@ import zlib
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, ".")
-import zhaohe_protocol as P
+import zh_protocol as P
 import send_cmd4 as S4
 import soco_write as W
 import soco_read as R
@@ -158,6 +158,9 @@ CMD137 = 137                      # UserRankListReq / UserRankListAck
 RANK_TYPE_DAXUANGUAN = 0          # 大选关榜
 RANK_TYPE_TOWER = 1               # 爬塔榜
 RANK_TYPE_NAMES = {RANK_TYPE_DAXUANGUAN: "大选关榜", RANK_TYPE_TOWER: "爬塔榜"}
+# 爬塔榜分数下限：低于 1000 的分数（如 0/几百）在游戏里显示会出错，
+# 上报时统一抬到 1000。
+TOWER_MIN_SCORE = 1000
 
 CMD146 = 146                      # UploadValueReq / UploadValueAck（计数上传）
 CMD170 = 170                      # NewBossDamageWithDataReq / Ack（世界魔王伤害上报）
@@ -245,8 +248,20 @@ def upload_rank_value(sid, uid, value, rank_type=RANK_TYPE_LEVEL,
 
     req: [Long]sid [Long]uid [Int]serverId [Int]type [Int]value
     ack: [Int]result   1 = 成功
+
+    ★ 爬塔榜（type=1）的 value 编码是「层 × 10000 + 关卡 × 100」，关卡从第 10 关起
+      （实测榜单：4301000 / 2915000 / 2507000 …，低位都 ≥ 1000）。
+      低位不足 1000（如 4300900 的 "0900"）或整体低于 1000，游戏端会显示错乱，
+      这里统一抬到合法值：层不变，低位补到 1000。
     """
     value = int(value)
+    if rank_type == RANK_TYPE_TOWER:
+        layer, stage = divmod(max(value, 0), 10000)
+        if value < TOWER_MIN_SCORE or stage < TOWER_MIN_SCORE:
+            fixed = layer * 10000 + TOWER_MIN_SCORE
+            print(f"  · 爬塔榜分数 {value} 不合法（层={layer} 低位={stage}），"
+                  f"按 {fixed} 上报")
+            value = fixed
     c, p, b = _send(CMD136, [("int", server_id), ("int", rank_type),
                              ("int", value)], sid, uid, timeout=timeout)
     ok = (p == CMD136)
