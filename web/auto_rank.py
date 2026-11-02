@@ -224,6 +224,7 @@ class AutoRank:
         self.banned = set()              # 已被服务端判「帐号异常」并删掉的 uid
         self.own_uids = set()            # 数据库里所有账号的 uid（比分数时排除）
         self.wb_done = set()             # "uid:end_ms" 已上报过魔王伤害
+        self.wb_owner = {}               # end_ms -> 本期负责冲魔王的 uid（只允许一个）
         self.arena_pushed = {}           # "uid:end_ms" -> 上次推分时间
         self.thread = threading.Thread(target=self._loop, name="auto-rank", daemon=True)
 
@@ -320,6 +321,7 @@ class AutoRank:
                 self.next_rank_tick = None
                 self.next_sprint_tick = None
                 self.wb_done.clear()
+                self.wb_owner.clear()
                 self.arena_pushed.clear()
                 self.force = True
                 self._log(f"新的一天（北京时间 {today}）：准备 0 点任务")
@@ -732,6 +734,11 @@ class AutoRank:
         key = f"{uid}:{end_ms}"
         if key in self.wb_done:
             return "魔王: 本期已上报过"
+        # 本期已经由别的账号冲过 → 不再动手（榜单刷新有延迟，光靠查榜拦不住）
+        owner = self.wb_owner.get(end_ms)
+        if owner and int(owner) != uid:
+            task["wb"]["last"] = f"本期已由 uid={owner} 冲过，跳过"
+            return "魔王: 本期已由其他账号冲过，跳过"
         if int(st.get("remaining") or 0) <= 0:
             task["wb"]["last"] = "本期挑战次数已用完"
             self.wb_done.add(key)
@@ -742,8 +749,24 @@ class AutoRank:
             task["wb"]["last"] = f"排行榜查询失败：{rk.get('error')}"
             return "魔王: 排行榜查询失败"
         entries = rk.get("entries") or []
-        # ★ 排除自己库里所有号（其他日期的任务号伤害一样，会把目标越抬越高）
-        top = top_of_others(entries, self.own_uids or {uid})
+        own = self.own_uids or {uid}
+
+        # ★ 冲之前先看「真正的榜一」是谁：如果已经是库里自己的账号，
+        #   这一轮直接跳过 —— 否则每个号都踩着上一个人的伤害再 +100~200，
+        #   榜上就会被一串同前缀的自建号霸榜，一眼假。
+        first = None
+        for e in entries:
+            if int(e.get("rank") or -1) == 1:
+                first = e
+                break
+        if first and int(first.get("uid") or 0) in own:
+            task["wb"]["last"] = (f"榜一已是我方账号（{first.get('name')}），"
+                                  f"本轮跳过")
+            return "魔王: 榜一已是自有账号，跳过"
+
+        # 目标分仍然只跟「其他玩家」比（排除自己库里所有号），
+        # 万一榜上除了自己没别人就直接跳过
+        top = top_of_others(entries, own) or first
         if not top:
             task["wb"]["last"] = "伤害榜上没有其他玩家"
             return "魔王: 伤害榜上没有其他玩家"
@@ -754,6 +777,7 @@ class AutoRank:
         if delta <= 0:
             task["wb"]["last"] = f"累计 {my_total} 已达标 {target}"
             self.wb_done.add(key)
+            self.wb_owner[end_ms] = uid      # 本期由这个号代表，别让别的号再抬
             return "魔王: 累计伤害已达标"
 
         r = m.upload_worldboss_damage(sid, uid, delta)
@@ -762,8 +786,9 @@ class AutoRank:
             return f"魔王: 上报失败（{r.get('error')}）"
 
         self.wb_done.add(key)
+        self.wb_owner[end_ms] = uid
         task["wb"]["last"] = (f"榜一 {top.get('damage')} +{delta} → "
-                              f"累计 {r.get('total_damage')}")
+                              f"累计 {r.get('total_damage')}（本期由本号负责冲）")
         return (f"魔王: 榜一 {top.get('damage')} → 目标 {target}"
                 f"（本次 +{delta}，累计 {r.get('total_damage')}）")
 
