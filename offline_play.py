@@ -1221,11 +1221,41 @@ def open_all_switches(data, unlock_skins=False):
     return bytes(data), info
 
 
+def embedded_template():
+    """内嵌 soco.bin 模板（web/soco_template.py 里的 base64）。
+
+    模板文件（TEMPLATE_DEFAULT 那个绝对路径）被删掉/换机器时兜底用，
+    内容与当初打包进 web 端的是同一份。
+    """
+    p = os.path.join(BASE_DIR, "web")
+    if p not in sys.path:
+        sys.path.insert(0, p)
+    from soco_template import data as _data
+    return _data()
+
+
+def load_template(template_path):
+    """读模板文件；不存在就用内嵌模板，并把内嵌模板落回原路径。"""
+    try:
+        with open(template_path, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        data = embedded_template()
+        print(f"  ! 模板 {template_path} 不存在，改用内嵌模板（{len(data)} 字节）")
+        try:
+            os.makedirs(os.path.dirname(template_path) or ".", exist_ok=True)
+            with open(template_path, "wb") as f:
+                f.write(data)
+            print(f"  ✓ 已把内嵌模板写回 {template_path}")
+        except OSError as e:
+            print(f"  · 写回失败（不影响本次生成）：{e}")
+        return data
+
+
 def build_save(template_path, target_uid, chapter, out_path=None,
                open_switches=True, unlock_skins=False):
     """模板存档 → 开功能开关 → 改章节 → 换 uid → 重算 CRC。"""
-    with open(template_path, "rb") as f:
-        data = f.read()
+    data = load_template(template_path)
     info = {}
 
     # a) 功能开关（装扮默认不解锁，除非显式要求）
@@ -2003,8 +2033,8 @@ def main():
         return
 
     if not args.no_save and not os.path.exists(args.template):
-        print(f"✗ 模板存档不存在: {args.template}")
-        sys.exit(1)
+        print(f"  ! 模板存档不存在: {args.template}")
+        print("    将使用内嵌模板（web/soco_template.py 里那份）继续，并写回该路径")
 
     if args.dry:
         print(f"  [dry] 模板     : {args.template}")
