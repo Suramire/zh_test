@@ -1084,6 +1084,59 @@ def change_nickname(sid, uid, name, timeout=20, use_prefix=True):
     return {"ok": True, "pid": p, "name": new_name, "message": None, "sent": sent}
 
 
+SENSITIVE_TOKEN_RE = re.compile(r"敏感词\s*[:：]\s*([^\s，。、；;!！]+)")
+
+
+def sensitive_token(msg):
+    """从「含有敏感词:51」里取出被服务端点名的词（取不到返回 None）。"""
+    m2 = SENSITIVE_TOKEN_RE.search(str(msg or ""))
+    return m2.group(1) if m2 else None
+
+
+def _alt_digits(width, avoid):
+    """生成 width 位数字串，且不等于、不包含 avoid（avoid 为空表示没限制）。"""
+    width = max(1, int(width or 1))
+    avoid = str(avoid or "")
+    for _ in range(80):
+        s = "".join(random.choice("0123456789") for _ in range(width))
+        if s != avoid and (not avoid or avoid not in s):
+            return s
+    return "0" * width
+
+
+def vary_digits(name):
+    """把名字里的每一段数字都换一组（长度不变），用于「名字被占用」重试。"""
+    old = str(name)
+
+    def repl(mt):
+        return _alt_digits(len(mt.group(0)), mt.group(0))
+
+    new = re.sub(r"\d+", repl, old)
+    if new == old:  # 名字里没有数字，补一个随机后缀
+        new = f"{old}{random.randint(10, 99)}"
+    return new
+
+
+def avoid_sensitive(name, token=None):
+    """把名字里命中「敏感词」的片段换成别的数字。
+
+    · 服务端一般回「含有敏感词:51」，token 是纯数字 → 精确替换掉那段数字；
+    · token 取不到（或不是数字）→ 退化成整体换一组数字。
+    """
+    old = str(name)
+    token = str(token or "")
+    if token.isdigit() and token:
+        new = old
+        while token in new:
+            nxt = new.replace(token, _alt_digits(len(token), token), 1)
+            if nxt == new:      # 理论上不会发生，兜底防死循环
+                break
+            new = nxt
+        if new != old:
+            return new
+    return vary_digits(old)
+
+
 def ensure_nickname(sid, uid, fallback_name=None, log=print, force=False):
     """上传分数前的统一前置：昵称是 Playerxxxx 就换成「别人的昵称 + 随机数字」。
 
@@ -1141,8 +1194,14 @@ def ensure_nickname(sid, uid, fallback_name=None, log=print, force=False):
                 ci += 1
                 continue
             if any(w in msg for w in SENSITIVE_WORDS):
-                log(f"    含敏感词（{msg}），换下一个底名")
-                break
+                token = sensitive_token(msg)
+                if token and (not token.isdigit() or token in core):
+                    # 敏感词在底名里，换数字没用 → 换下一个底名
+                    log(f"    含敏感词（{msg}，词在底名里），换下一个底名")
+                    break
+                log(f"    含敏感词（{msg}），换一组随机数字再试")
+                digits = _alt_digits(len(digits), token or "")
+                continue
             if any(w in msg.lower() for w in NAME_TAKEN_WORDS):
                 log(f"    名字被占用（{msg}），换一组随机数字再试")
                 digits = str(random.randint(100, 9999))

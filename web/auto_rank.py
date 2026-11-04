@@ -48,6 +48,7 @@ NICK_PREFIX = "片刻"
 BATCH_SIZE = 10
 LOOKBACK_DAYS = 7
 MAX_CREATE_ATTEMPTS = BATCH_SIZE + 2
+NICK_RETRY_LIMIT = 6               # 改名被服务端拒（敏感词/占用）时换数字重试的上限
 LOG_LIMIT = 400
 STATUS_LOG_LINES = 200
 
@@ -446,10 +447,11 @@ class AutoRank:
 
         self._log(f"今日还没有账号，开始创建 {BATCH_SIZE} 个 …")
         created = []
+        failed = set()          # 建号失败的名字，别在下一轮又抽到同一个
         attempts = 0
         while self.enabled and len(created) < BATCH_SIZE and attempts < MAX_CREATE_ATTEMPTS:
             attempts += 1
-            used = {str(a.get("nick") or "") for a in created}
+            used = {str(a.get("nick") or "") for a in created} | failed
             index = next((i for i in range(1, BATCH_SIZE + 1)
                           if batch_nick(today, i) not in used), None)
             if index is None:
@@ -458,6 +460,7 @@ class AutoRank:
             try:
                 acc = self._create_account(nick)
             except Exception as e:
+                failed.add(nick)
                 self._log(f"✗ 建号 {nick} 失败：{type(e).__name__}: {e}")
                 time.sleep(1)
                 continue
@@ -486,7 +489,29 @@ class AutoRank:
                             "servertime": lg.get("servertime", 0)})
                 if lg.get("otherName"):
                     acc["nickName"] = lg["otherName"]
-                r = m.change_nickname(acc["sid"], acc["uid"], nick)
+                # ★ 服务端会按「敏感词表」拒名字，而且数字也算（实测「片刻8511W01」
+                #   回「含有敏感词:51」）；名字被占用也会拒。这里就地换数字重试，
+                #   不要直接抛错——否则同一个批次号会一直撞同一堵墙。
+                r = None
+                cand = nick
+                for attempt in range(1, NICK_RETRY_LIMIT + 1):
+                    r = m.change_nickname(acc["sid"], acc["uid"], cand)
+                    if r.get("ok"):
+                        break
+                    msg = str(r.get("message") or "")
+                    if any(w in msg for w in m.SENSITIVE_WORDS):
+                        nxt = m.avoid_sensitive(cand, m.sensitive_token(msg))
+                        self._log(f"  · 昵称 {cand!r} 含敏感词（{msg}），"
+                                  f"第 {attempt} 次换数字 -> {nxt!r}")
+                    elif any(w.lower() in msg.lower() for w in m.NAME_TAKEN_WORDS):
+                        nxt = m.vary_digits(cand)
+                        self._log(f"  · 昵称 {cand!r} 已被占用（{msg}），"
+                                  f"第 {attempt} 次换数字 -> {nxt!r}")
+                    else:
+                        break
+                    if nxt == cand:      # 兜底：保证每轮都真的换了名字
+                        nxt = m.vary_digits(cand)
+                    cand = nxt
                 if not r.get("ok"):
                     raise RuntimeError(f"改名失败：{r.get('message') or '服务端未接受'}")
                 acc["nickName"] = r["name"]
