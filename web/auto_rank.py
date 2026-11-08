@@ -9,7 +9,7 @@
    · 榜单截止前 10 分钟：改成「榜一 + 100」，type=0 上限 14000
 2. 世界魔王榜（CMD142/176/170）
    · 只在「魔王本期截止前 10 分钟」动作，0 点到晚上 8 点不执行
-   · 取本期伤害榜榜一的伤害 + 随机 100~200 作为目标，
+   · 取本期伤害榜第一名的伤害 × 110% 作为目标，
      上报差额 = 目标 − 自己当前累计伤害（CMD170 的 damage 是累加的）
 3. 竞技场（CMD48/24/25/26）
    · 同样只在「今日竞技场关闭前 10 分钟」动作
@@ -59,7 +59,7 @@ SPRINT_INTERVAL = 2 * 60           # 冲刺阶段每 2 分钟复查一次
 RANK_LOW_GAP = 100                 # 平时比榜一低 100
 RANK_HIGH_GAP = 100                # 冲刺时比榜一高 100
 RANK_TYPE0_CAP = 14000             # 大选关榜上限
-WB_BONUS = (100, 200)              # 魔王目标 = 榜一 + 100~200
+WB_MULT = 1.1                  # 魔王目标 = 第一名伤害的 110%
 ARENA_BONUS = (20, 100)            # 竞技场目标 = 非自己榜一 + 20~100
 ARENA_LV_DEFAULT = 158             # 与页面「匹配→取消」用的 lv 一致
 ARENA_REPUSH_SECONDS = 180         # 已废弃：现在每期每号只推一次
@@ -796,7 +796,8 @@ class AutoRank:
             task["wb"]["last"] = "伤害榜上没有其他玩家"
             return "魔王: 伤害榜上没有其他玩家"
 
-        target = int(top.get("damage") or 0) + random.randint(*WB_BONUS)
+        # 魔王目标 = 第一名伤害的 110%
+        target = int((int(top.get("damage") or 0) * WB_MULT) // 1)
         my_total = int(st.get("total_damage") or 0)
         delta = target - my_total
         if delta <= 0:
