@@ -45,6 +45,7 @@ import offline_play as m
 
 BEIJING = timezone(timedelta(hours=8))
 NICK_PREFIX = "别氪了"
+NICK_FALLBACK_PREFIX = "片刻"          # 「别氪了」前缀不可用时兜底回退到这个前缀
 BATCH_SIZE = 10
 LOOKBACK_DAYS = 7
 MAX_CREATE_ATTEMPTS = BATCH_SIZE + 2
@@ -101,6 +102,25 @@ def day_code(day):
 
 def batch_nick(day, index):
     return f"{NICK_PREFIX}{day_code(day)}{int(index):02d}"
+
+
+def fallback_prefix(name):
+    """「别氪了」前缀不可用时，回退到旧前缀「片刻」（保持尾部日期码/序号不变）。
+
+    只做单向回退：名字以主前缀开头才换成兜底前缀，否则返回 None。
+    """
+    name = str(name or "")
+    if name.startswith(NICK_PREFIX):
+        return NICK_FALLBACK_PREFIX + name[len(NICK_PREFIX):]
+    return None
+
+
+def move_last_to_front(name):
+    """昵称重复时：把最后一位字符移到名字最前面。"""
+    name = str(name or "")
+    if len(name) <= 1:
+        return name
+    return name[-1] + name[:-1]
 
 
 def fmt_ts(ts):
@@ -494,18 +514,30 @@ class AutoRank:
                 #   不要直接抛错——否则同一个批次号会一直撞同一堵墙。
                 r = None
                 cand = nick
+                fell_back = False      # 是否已从「别氪了」回退到「片刻」
                 for attempt in range(1, NICK_RETRY_LIMIT + 1):
                     r = m.change_nickname(acc["sid"], acc["uid"], cand)
                     if r.get("ok"):
                         break
                     msg = str(r.get("message") or "")
-                    if any(w in msg for w in m.SENSITIVE_WORDS):
+                    sensitive = any(w in msg for w in m.SENSITIVE_WORDS)
+                    taken = any(w.lower() in msg.lower() for w in m.NAME_TAKEN_WORDS)
+                    # ①「氪」名字不可用 → 整体回退到旧前缀「片刻」（只做一次）
+                    if not fell_back and cand.startswith(NICK_PREFIX):
+                        fb = fallback_prefix(cand)
+                        if fb:
+                            fell_back = True
+                            nxt = fb
+                            self._log(f"  · 昵称 {cand!r} 不可用（{msg}），"
+                                      f"第 {attempt} 次回退前缀 -> {nxt!r}")
+                    elif taken:
+                        # ② 昵称重复 → 把最后一位字符串移动到名字最前面
+                        nxt = move_last_to_front(cand)
+                        self._log(f"  · 昵称 {cand!r} 已被占用（{msg}），"
+                                  f"第 {attempt} 次移动末位 -> {nxt!r}")
+                    elif sensitive:
                         nxt = m.avoid_sensitive(cand, m.sensitive_token(msg))
                         self._log(f"  · 昵称 {cand!r} 含敏感词（{msg}），"
-                                  f"第 {attempt} 次换数字 -> {nxt!r}")
-                    elif any(w.lower() in msg.lower() for w in m.NAME_TAKEN_WORDS):
-                        nxt = m.vary_digits(cand)
-                        self._log(f"  · 昵称 {cand!r} 已被占用（{msg}），"
                                   f"第 {attempt} 次换数字 -> {nxt!r}")
                     else:
                         break
