@@ -22,7 +22,7 @@
 
 账号
 ====
-· 每天 0 点检查：当天没有账号才建 10 个（昵称 = 片刻 + 日期码 + 序号）；
+· 每天 0 点检查：当天没有账号才建 10 个（昵称 = 别氪了 + 日期码 + 序号）；
   当天已有账号（手动建的也算）则跳过建号。
 · 今天 + 之前 7 天，每天一个任务：先取当天最早的账号，登录/查榜/上报任一步
   失败（含「帐号异常」）就换当天下一个号，直到号用完或榜单截止。
@@ -44,7 +44,7 @@ from datetime import datetime, timedelta, timezone
 import offline_play as m
 
 BEIJING = timezone(timedelta(hours=8))
-NICK_PREFIX = "片刻"
+NICK_PREFIX = "别氪了"
 BATCH_SIZE = 10
 LOOKBACK_DAYS = 7
 MAX_CREATE_ATTEMPTS = BATCH_SIZE + 2
@@ -489,7 +489,7 @@ class AutoRank:
                             "servertime": lg.get("servertime", 0)})
                 if lg.get("otherName"):
                     acc["nickName"] = lg["otherName"]
-                # ★ 服务端会按「敏感词表」拒名字，而且数字也算（实测「片刻8511W01」
+                # ★ 服务端会按「敏感词表」拒名字，而且数字也算（实测「别氪了8511W01」
                 #   回「含有敏感词:51」）；名字被占用也会拒。这里就地换数字重试，
                 #   不要直接抛错——否则同一个批次号会一直撞同一堵墙。
                 r = None
