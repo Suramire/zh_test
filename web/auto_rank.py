@@ -500,7 +500,8 @@ class AutoRank:
                 acc = m.register()
                 try:
                     lg = m.login(acc["userName"], acc["passwd"],
-                                 acc.get("nickName") or acc["userName"])
+                                 acc.get("nickName") or acc["userName"],
+                                 fingerprint=acc.get("fingerprint"))
                 except Exception as e:
                     if is_banned_error(e):
                         self._drop_banned(acc, e)
@@ -690,7 +691,8 @@ class AutoRank:
 
                 try:
                     lg = m.login(acc["userName"], acc["passwd"],
-                                 acc.get("nickName") or acc["userName"])
+                                 acc.get("nickName") or acc["userName"],
+                                 fingerprint=acc.get("fingerprint"))
                 except Exception as e:
                     if is_banned_error(e):
                         self._drop_banned(acc, e)

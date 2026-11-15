@@ -599,7 +599,8 @@ def login_current(retries=3):
     for attempt in range(1, retries + 1):
         try:
             lg = m.login(acc["userName"], acc["passwd"],
-                         acc.get("nickName") or acc["userName"])
+                         acc.get("nickName") or acc["userName"],
+                         fingerprint=acc.get("fingerprint"))
             break
         except Exception as e:
             msg = str(e)
@@ -617,6 +618,9 @@ def login_current(retries=3):
                 "servertime": lg.get("servertime", 0)})
     if lg.get("otherName"):
         acc["nickName"] = lg["otherName"]
+    # 老账号没有存过指纹：把这次登录用的那套记下来，之后就一直复用
+    if not acc.get("fingerprint") and lg.get("fingerprint"):
+        acc["fingerprint"] = lg["fingerprint"]
     m.save_account(acc, make_current=True, source="web")
     print(f"  ✓ 登录成功 uid={uid}  sid={acc['sid']}  "
           f"nick={acc.get('nickName')}  status={lg.get('status')}")
@@ -729,7 +733,8 @@ def api_register(_body=None):
     print("[web] 注册新账号 ...")
     acc = m.register()
     print(f"  ✓ 注册成功 uid={acc['uid']}  user={acc['userName']}")
-    lg = m.login(acc["userName"], acc["passwd"], acc["nickName"])
+    lg = m.login(acc["userName"], acc["passwd"], acc["nickName"],
+                 fingerprint=acc.get("fingerprint"))
     acc.update({"sid": int(lg["sid"]), "servertime": lg.get("servertime", 0)})
     if lg.get("otherName"):
         acc["nickName"] = lg["otherName"]
@@ -805,7 +810,10 @@ def api_account_import(body):
     if uid:
         acc["uid"] = int(uid)
     if not acc.get("uid"):
-        lg = m.login(acc["userName"], acc["passwd"], acc["nickName"])
+        lg = m.login(acc["userName"], acc["passwd"], acc["nickName"],
+                     fingerprint=acc.get("fingerprint"))
+        if lg.get("fingerprint"):
+            acc.setdefault("fingerprint", lg["fingerprint"])
         acc["uid"] = int(lg["uid"])
         acc["sid"] = int(lg["sid"])
         acc["nickName"] = lg.get("otherName") or acc["nickName"]

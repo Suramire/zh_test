@@ -52,7 +52,7 @@ NETDATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "NetData
 NETDATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "netdata_gen")
 
 # 从统一设备指纹配置文件读取 (device_fingerprint.py)
-from device_fingerprint import DEVICE as DEFAULT_DEVICE
+from device_fingerprint import new_identity, fingerprint_of
 
 
 def read_utf(buf, off):
@@ -211,7 +211,9 @@ def _err255_text(body):
 
 def send_cmd1(sid, user, passwd, other, lang=0, device=None, s_session_id=0,
               counter=1, timeout=10):
-    dev = dict(DEFAULT_DEVICE)
+    # ★ 原来那套写死的 sha1/phoneSign 已被服务端拉黑（登录会回「帐号异常」），
+    #   没传 device 就现生成一套；传了就用账号里存的那一套（acc["fingerprint"]）。
+    dev = new_identity()
     if device:
         dev.update({k: v for k, v in device.items() if v is not None})
     body = build_body(sid, user, passwd, other, lang, dev, s_session_id, counter)
@@ -255,6 +257,8 @@ def send_cmd1(sid, user, passwd, other, lang=0, device=None, s_session_id=0,
         "uid": uid, "sid": new_sid, "servertime": servertime,
         "userName": userName, "passwd": passwd2, "otherName": otherName,
         "status": status,
+        # 本次登录用的指纹：账号里还没存的话，调用方可以顺手存下来
+        "fingerprint": fingerprint_of(dev),
     }
 
 
@@ -280,6 +284,7 @@ if __name__ == "__main__":
     ap.add_argument("--name-id", default=REALNAME_INFO, help=f"实名信息 姓名#身份证号(默认: {REALNAME_INFO})")
     args = ap.parse_args()
 
+    acc = None
     if args.sid is None or args.user is None or args.passwd is None:
         acc = load_account(args.account_file)
         sid = args.sid if args.sid is not None else int(acc["sid"])
@@ -291,9 +296,10 @@ if __name__ == "__main__":
         sid, user, passwd = args.sid, args.user, args.passwd
         other = args.other if args.other else user
 
-    device_over = None
+    # 账号文件里存了建号时那套指纹 → 默认就用它；--device 再逐项覆盖
+    device_over = dict((acc or {}).get("fingerprint") or {}) or None
     if args.device:
-        device_over = {}
+        device_over = dict(device_over or {})
         for kv in args.device.split(","):
             if ":" in kv:
                 k, v = kv.split(":", 1)

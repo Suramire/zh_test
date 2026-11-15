@@ -216,7 +216,11 @@ SID_UID_DIR = os.path.join(BASE_DIR, "accounts", "sid_uid")
 # ─────────────────────────────────────
 def register(**over):
     code, r = S4.send_cmd4(0, 0, **(over or {}))
-    if not isinstance(r, dict) or not r.get("uid"):
+    if not isinstance(r, dict):
+        raise RuntimeError(f"注册失败: {r}")
+    if r.get("error"):          # 255 回包：指纹被拉黑等
+        raise RuntimeError(f"注册被拒：{r['error']}")
+    if not r.get("uid"):
         raise RuntimeError(f"注册失败: {r}")
     return r
 
@@ -224,11 +228,16 @@ def register(**over):
 # ─────────────────────────────────────
 #  2) 登录
 # ─────────────────────────────────────
-def login(user, passwd, other, timeout=20):
-    """CMD1 登录。★ 不能用 P.send_protocol —— 它会多写一个 uid 字段导致错位。"""
+def login(user, passwd, other, fingerprint=None, timeout=20):
+    """CMD1 登录。★ 不能用 P.send_protocol —— 它会多写一个 uid 字段导致错位。
+
+    fingerprint：建号时用的那套设备指纹（acc["fingerprint"]）。
+    不传就现生成一套；传错（换成别的号的身份）有可能被服务端判「帐号异常」。
+    """
     import send_cmd1 as S1
     try:
-        code, info = S1.send_cmd1(0, user, passwd, other, lang=0, timeout=timeout)
+        code, info = S1.send_cmd1(0, user, passwd, other, lang=0,
+                                  device=fingerprint, timeout=timeout)
     except Exception as e:
         msg = str(e)
         if msg.startswith("登录被拒绝"):     # cmd=255 风控/封号：别再包一层，重试也没用
@@ -1555,7 +1564,7 @@ def save_account(acc, make_current=True, source=None):
     doc = _load_account_doc()
     rec = dict(doc["accounts"].get(str(uid)) or {})
     for k in ("uid", "userName", "passwd", "nickName", "playerLevel",
-              "sid", "servertime", "status"):
+              "sid", "servertime", "status", "fingerprint"):
         if acc.get(k) is not None:
             rec[k] = acc[k]
     now = now_bj_str()          # 统一北京时间，服务器在 UTC 也不会错位

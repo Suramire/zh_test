@@ -49,13 +49,22 @@ ACCOUNT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zhaohe_
 # NetData.bin 输出路径(与容器结构一致)
 NETDATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "NetData.bin")
 
-# 从统一设备指纹配置文件读取 (device_fingerprint.py)
-from device_fingerprint import DEVICE as DEFAULT
+# 设备指纹模板 + 每账号一份的随机身份 (device_fingerprint.py)
+from device_fingerprint import new_identity, fingerprint_of
 
 
 def read_utf(buf, off):
     (n,) = struct.unpack_from(">H", buf, off); off += 2
     return buf[off:off + 2 * n].decode("utf-16-be", errors="replace"), off + 2 * n
+
+
+def read_error(buf):
+    """255 回包：[B]255 + [UTF]错误文案。"""
+    try:
+        msg, _ = read_utf(buf, 1)
+        return msg or buf.hex()
+    except Exception:
+        return buf.hex()
 
 
 def build_body(sid, lang, version, channel, device, os_, sha1, phone_sign, more,
@@ -71,8 +80,14 @@ def build_body(sid, lang, version, channel, device, os_, sha1, phone_sign, more,
     return b
 
 
-def send_cmd4(sid=0, lang=0, s_session_id=0, counter=0, timeout=10, **fields):
-    d = dict(DEFAULT)
+def send_cmd4(sid=0, lang=0, s_session_id=0, counter=0, timeout=10,
+              identity=None, **fields):
+    """CMD4 生成账号。
+
+    ★ 每次注册都换一套新指纹：同一个 phoneSign 建过一批号之后会被服务端
+      拉黑，再拿它注册就只回 255「联网失败」。identity 可显式传入。
+    """
+    d = dict(identity) if identity else new_identity()
     d.update({k: v for k, v in fields.items() if v is not None})
     body = build_body(sid, lang, d["version"], d["channel"], d["device"], d["os"],
                       d["sha1"], d["phoneSign"], d["more"], s_session_id, counter)
@@ -92,6 +107,9 @@ def send_cmd4(sid=0, lang=0, s_session_id=0, counter=0, timeout=10, **fields):
 
     (count, length) = struct.unpack_from(">II", data, 0)
     body_resp = data[8:8 + length]
+    if body_resp and body_resp[0] == 0xFF:
+        # 「联网失败」= 该指纹已被服务端拉黑，别当成解析错误往上抛
+        return http_code, {"error": read_error(body_resp), "uid": 0}
     off = 1  # 跳过 protocolID
     userName, off = read_utf(body_resp, off)
     passwd, off = read_utf(body_resp, off)
@@ -104,6 +122,8 @@ def send_cmd4(sid=0, lang=0, s_session_id=0, counter=0, timeout=10, **fields):
     return http_code, {
         "userName": userName, "passwd": passwd, "nickName": nickName,
         "uid": uid, "sid": new_sid, "servertime": servertime, "status": status,
+        # 建号用的那套指纹要跟账号存一起，后续登录复用
+        "fingerprint": fingerprint_of(d),
     }
 
 
@@ -121,19 +141,25 @@ def gen_netdata_bin(uid, user, passwd, other, out_file=NETDATA_FILE):
 
 
 if __name__ == "__main__":
+    from device_fingerprint import DEVICE as TEMPLATE
     ap = argparse.ArgumentParser(description="模拟 CMD 4 GenCounter (生成新账号)")
     ap.add_argument("--sid", type=int, default=0, help="sid(未登录=0)")
     ap.add_argument("--lang", type=int, default=0, help="语言")
     ap.add_argument("--no-netdata", action="store_true", help="不生成 NetData.bin")
-    for k in DEFAULT:
-        ap.add_argument(f"--{k}", default=None, help=f"{k}(默认: {DEFAULT[k]})")
+    for k in TEMPLATE:
+        ap.add_argument(f"--{k}", default=None, help=f"{k}(默认随机生成: {TEMPLATE[k]})")
     args = ap.parse_args()
 
-    fields = {k: (getattr(args, k) if getattr(args, k) is not None else DEFAULT[k]) for k in DEFAULT}
+    # 每次调用现生成一套指纹，命令行只覆盖显式给出的字段
+    ident = new_identity()
+    for k in TEMPLATE:
+        v = getattr(args, k)
+        if v is not None:
+            ident[k] = v
     print(f"发送 CMD 4 (GenCounter 生成账号) → {URL}")
-    print(f"  设备: {fields['device']}  渠道: {fields['channel']}  版本: {fields['version']}")
+    print(f"  设备: {ident['device']}  渠道: {ident['channel']}  版本: {ident['version']}")
     try:
-        code, info = send_cmd4(sid=args.sid, lang=args.lang, **fields)
+        code, info = send_cmd4(sid=args.sid, lang=args.lang, identity=ident)
         print(f"HTTP {code}")
         print(f"== 服务端返回的新账号 ==")
         for k, v in info.items():
