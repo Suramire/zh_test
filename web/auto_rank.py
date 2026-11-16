@@ -26,6 +26,8 @@
   当天已有账号（手动建的也算）则跳过建号。
 · 今天 + 之前 7 天，每天一个任务：先取当天最早的账号，登录/查榜/上报任一步
   失败（含「帐号异常」）就换当天下一个号，直到号用完或榜单截止。
+· 早于 7 天的账号也逐个登录，但只参与魔王榜和竞技场，不碰常规榜。
+· 登录提示「帐号异常」时从账号库删除；前端收到删号事件后刷新账号列表。
 · 建号后显式 UPSERT 进 MySQL 并回读校验（server 注入 db_sync 回调）。
 
 开关
@@ -208,7 +210,7 @@ def top_of_others(entries, own_uids, rank_type=None):
 def is_banned_error(err):
     """登录失败是否是服务端判定的「帐号异常」（cmd=255）。"""
     msg = str(err)
-    return "登录被拒绝" in msg or "帐号异常" in msg
+    return ("登录被拒绝" in msg or "帐号异常" in msg or "账号异常" in msg)
 
 
 def in_window(end_ms, now_ms=None):
@@ -238,6 +240,7 @@ class AutoRank:
         self.day = None
         self.batch_day = None
         self.tasks = []
+        self.historical_tasks = {}     # uid -> 7 天前账号的魔王 / 竞技任务
         self.next_rank_tick = None
         self.next_sprint_tick = None
         self.last_error = None
@@ -338,6 +341,7 @@ class AutoRank:
             if self.day != today:
                 self.day = today
                 self.tasks = []
+                self.historical_tasks = {}
                 self.finished = False
                 self.next_rank_tick = None
                 self.next_sprint_tick = None
@@ -351,7 +355,7 @@ class AutoRank:
             finished = self.finished
             next_rank = self.next_rank_tick
             next_sprint = self.next_sprint_tick
-        if finished:
+        if finished and not self.historical_tasks:
             return
         now = time.time()
         if force or next_rank is None or now >= next_rank:
@@ -362,7 +366,7 @@ class AutoRank:
 
     def _any_window(self):
         with self.mu:
-            tasks = list(self.tasks)
+            tasks = list(self.tasks) + list(self.historical_tasks.values())
         return any(self._task_in_window(t) for t in tasks)
 
     def _task_in_window(self, task, now_ms=None):
@@ -393,7 +397,8 @@ class AutoRank:
             now_ms = int(time.time() * 1000)
             tasks = list(self.tasks)
             if not tasks:
-                self._log("⚠ 今天和之前 7 天都没有可用账号，等待下一轮")
+                self._log("⚠ 今天和之前 7 天都没有可用账号，改为检查历史账号")
+                self._run_historical_pass()
                 return
             self._log(f"开始{'常规' if full else '冲刺'}轮：{len(tasks)} 个日期任务"
                       + ("" if full else "（只处理截止前 10 分钟内的榜）"))
@@ -412,13 +417,15 @@ class AutoRank:
                     if not self._task_in_window(task, now_ms) and any(known):
                         continue
                 self._pass_task(task, full)
+            self._run_historical_pass()
             if all(t.get("done") for t in tasks):
                 with self.mu:
                     self.finished = True
-                    self.next_rank_tick = None
-                    self.next_sprint_tick = None
+                    self.next_rank_tick = now_ms / 1000 + RANK_TICK_SECONDS \
+                        if self.historical_tasks else None
+                    self.next_sprint_tick = 0 if self._any_window() else None
                 reasons = "；".join(f"{t['day']}：{t.get('reason')}" for t in tasks)
-                self._log(f"今日活动结束（{reasons}）。开关保持打开，明日 0 点自动开始")
+                self._log(f"最近账号任务结束（{reasons}）。历史账号仍按计划检查魔王 / 竞技场")
         except Exception as e:
             self.last_error = f"{type(e).__name__}: {e}"
             self._log(f"✗ 本轮执行失败：{self.last_error}")
@@ -678,8 +685,8 @@ class AutoRank:
         task.update(done=True, reason="账号已用完")
         self._log(f"[{day}] 账号已用完，停止该日任务")
 
-    def _check_account(self, task, acc_ref, full):
-        """登录 → 常规榜 → 魔王 → 竞技场，返回一句话结果。"""
+    def _check_account(self, task, acc_ref, full, historical=False):
+        """登录 → 常规榜（历史账号跳过）→ 魔王 → 竞技场，返回一句话结果。"""
         uid = int(acc_ref["uid"])
         buf = io.StringIO()
         try:
@@ -702,10 +709,18 @@ class AutoRank:
                 if lg.get("otherName"):
                     acc["nickName"] = lg["otherName"]
                 m.save_account(acc, make_current=False)
+                if historical and self.db_sync:
+                    # 文件模式 save_doc 会整份覆盖；MySQL 模式只 UPSERT 当前登录账号，
+                    # 避免旧快照把本轮已删除的其他异常账号重新写回数据库。
+                    saved = self.db_sync(acc)
+                    if not saved.get("ok"):
+                        self._log(f"⚠ 历史账号 uid={uid} 登录状态保存失败："
+                                  f"{saved.get('detail')}")
                 sid = int(acc["sid"])
 
                 notes = []
-                notes.append(self._do_rank137(task, acc, sid, full))
+                if not historical:
+                    notes.append(self._do_rank137(task, acc, sid, full))
                 notes.append(self._do_worldboss(task, acc, sid))
                 notes.append(self._do_arena(task, acc, sid))
                 return " | ".join(n for n in notes if n)
@@ -713,6 +728,75 @@ class AutoRank:
             detail = buf.getvalue().strip()
             if detail:
                 self._log(detail)
+
+    # ───────────── 历史账号（只冲魔王 / 竞技场） ─────────────
+    def _historical_accounts(self):
+        """创建日期早于最近 7 天窗口的所有账号。"""
+        cutoff = day_key(bj_now() - timedelta(days=LOOKBACK_DAYS))
+        out = []
+        for uid, acc in (self._pool() or {}).items():
+            uid = str(acc.get("uid") or uid)
+            day = created_day(acc)
+            # 以账号库为准：成功删号后记录会消失；删除失败则下轮重试，
+            # 不能因为内存 banned 集合把其它正常历史账号一并过滤掉。
+            if not day or day >= cutoff:
+                continue
+            out.append({"uid": uid, "nick": str(acc.get("nickName") or ""),
+                        "created": str(acc.get("createdAt") or "")})
+        out.sort(key=lambda a: (a["created"], int(a["uid"])))
+        return out
+
+    def _sync_historical_tasks(self):
+        """同步历史账号任务，保留已查询到的榜单截止时间供后续冲刺调度。"""
+        current = {a["uid"]: a for a in self._historical_accounts()}
+        for uid in list(self.historical_tasks):
+            if uid not in current:
+                self.historical_tasks.pop(uid, None)
+        for uid, ref in current.items():
+            if uid in self.historical_tasks:
+                self.historical_tasks[uid]["account"] = ref
+                continue
+            self.historical_tasks[uid] = {
+                "day": "历史账号", "account": ref, "done": False,
+                "end_time_ms": 0, "end_time_text": "",
+                "wb": {"end_time_ms": 0, "end_time_text": "", "last": ""},
+                "arena": {"end_time_ms": 0, "end_time_text": "", "last": ""},
+            }
+        return [self.historical_tasks[uid] for uid in current]
+
+    def _run_historical_pass(self):
+        """登录全部历史账号，只执行魔王、竞技场；账号异常时走统一删号链路。"""
+        tasks = self._sync_historical_tasks()
+        if not tasks:
+            self._log("历史账号：没有 7 天前的账号，跳过")
+            return
+        self._log(f"历史账号：{len(tasks)} 个，逐个登录并检查魔王 / 竞技场")
+        ok = failed = banned = 0
+        for task in tasks:
+            if not self.enabled:
+                self._log("历史账号：开关已关闭，本轮中止")
+                return
+            ref = task["account"]
+            try:
+                result = self._check_account(task, ref, full=False,
+                                             historical=True)
+            except Exception as e:
+                msg = str(e) or type(e).__name__
+                if is_banned_error(e):
+                    # 以删号回调结果为准，避免删除失败仍提示“已删号”。
+                    removed = ref["uid"] not in (self._pool() or {})
+                    self.historical_tasks.pop(ref["uid"], None)
+                    banned += 1
+                    self._log(f"✗ 历史账号 {ref['nick']}（uid={ref['uid']}）"
+                              + ("帐号异常，已删号并通知前端刷新" if removed
+                                 else "帐号异常，但账号库删除失败，请查看上条日志"))
+                else:
+                    failed += 1
+                    self._log(f"✗ 历史账号 {ref['nick']}（uid={ref['uid']}）：{msg}")
+                continue
+            ok += 1
+            self._log(f"✓ 历史账号 {ref['nick']}（uid={ref['uid']}）：{result}")
+        self._log(f"历史账号本轮完成：成功 {ok}，异常删号 {banned}，其他失败 {failed}")
 
     # ───────────── 常规榜 CMD137 ─────────────
     def _do_rank137(self, task, acc, sid, full):
