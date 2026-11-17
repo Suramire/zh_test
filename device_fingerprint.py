@@ -13,6 +13,12 @@
       落在 accounts.json / MySQL 的 extra 字段）；
     · 之后登录复用同一套，别在注册和登录之间换身份。
 
+★ 2026-11-17 再加一条：固定机型也会被拉黑！
+    · device 一直写死 Xiaomi#Redmi#2511FRT3DD，这个机型名建过的号太多，
+      服务端按机型封禁：CMD4 一律回 255「帐号异常，请联系客服!」
+      （实测：同一套指纹只换 device 就能建号成功，换成任意字符串都行）；
+    · 所以 device 改为真机机型池随机（DEVICE_MODELS），每套身份一个机型。
+
 各脚本用法:
     from device_fingerprint import new_identity
 
@@ -30,10 +36,37 @@ MORE_TEMPLATE = "{account:'',deviceType:'0',versionInfo:'%s'}"
 # 一次 CMD4 / CMD1 需要的全部指纹字段
 FINGERPRINT_KEYS = ("version", "channel", "device", "os", "sha1", "phoneSign", "more")
 
+# 真机机型池：服务端按 device 机型做风控（某个机型建号太多会整批拉黑），
+# 每套新身份从池里随机挑一个。全是市面常见安卓机型，乱造字符串也能过但太假。
+DEVICE_MODELS = (
+    "Redmi K60", "Redmi Note 12", "Redmi Note 11", "Redmi K40",
+    "2201123C", "2210132C", "M2012K11AC",            # 小米
+    "SM-S9180", "SM-G9960", "SM-A5360",              # 三星
+    "HUAWEI P60", "HUAWEI Mate 50", "HUAWEI nova 11",
+    "Honor 80", "Honor Magic5", "PGT-AN10",          # 荣耀/华为
+    "Pixel 8", "Pixel 7",
+    "vivo V29", "vivo iQOO 11", "v2302A",
+    "OPPO Reno10", "PGKM10", "PEFM00",
+    "oneplus 11", "PHB110",
+    "iPhone15,3", "iPhone14,2",                       # iOS 机型名格式
+)
 
 def new_sha1():
     """随机证书指纹：20 字节大写 hex，冒号分隔。"""
     return ":".join("%02X" % random.randint(0, 255) for _ in range(20))
+
+
+# 设备模板：机型改为池里随机（见 new_identity），OS / 版本 / 渠道保持固定
+# （服务端不按这几项判定），每次 new_identity() 换 device + sha1 + phoneSign。
+DEVICE = {
+    "version": "1.0.78",
+    "channel": "134",
+    "device": "",                       # ★ 禁用：写死会被按机型拉黑
+    "os": "15",
+    "sha1": new_sha1(),
+    "phoneSign": "134_" + uuid.uuid4().hex,
+    "more": MORE_TEMPLATE % RES_VERSION_INFO,
+}
 
 
 def new_identity(channel=None):
@@ -42,26 +75,13 @@ def new_identity(channel=None):
     return {
         "version": DEVICE["version"],
         "channel": ch,
-        "device": DEVICE["device"],
+        "device": random.choice(DEVICE_MODELS),
         "os": DEVICE["os"],
         "sha1": new_sha1(),
         # phoneSign 前缀必须等于渠道号，服务端会校验
         "phoneSign": f"{ch}_{uuid.uuid4().hex}",
         "more": MORE_TEMPLATE % RES_VERSION_INFO,
     }
-
-
-# 设备模板：机型 / OS / 版本 / 渠道保持固定（服务端不按这几项判定），
-# 每次 new_identity() 只换 sha1 + phoneSign。
-DEVICE = {
-    "version": "1.0.78",
-    "channel": "134",
-    "device": "Xiaomi#Redmi#2511FRT3DD",
-    "os": "15",
-    "sha1": new_sha1(),
-    "phoneSign": "134_" + uuid.uuid4().hex,
-    "more": MORE_TEMPLATE % RES_VERSION_INFO,
-}
 
 
 def fingerprint_of(ident):
