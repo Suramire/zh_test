@@ -767,19 +767,30 @@ function renderAutoRank(d) {
   btn.classList.toggle("primary", !d.enabled);
 
   const store = d.store ? ` · 账号库：${d.store}` : "";
+  // 固定号（坐榜号）状态：单独一行，与轮训进度分开展示
+  const an = d.anchor || {};
+  const anchorText = an.target
+    ? ` · 固定号：${an.count || 0}/${an.target}` +
+      (an.ended
+        ? " · 榜单已截止，已停止每日加分"
+        : ` · 每日 21:00 加分（下次 ${an.next_at_text || "-"}）` +
+          (an.score_day && an.score_day === d.today ? "，今日已执行" : ""))
+    : "";
   if (!d.enabled) {
     $("autoRankNext").textContent =
       "开关关闭。点「启动自动刷榜」立即开始今日任务；开关打开后每天北京时间 0 点自动触发。"
-      + store;
+      + store + anchorText;
   } else if (d.finished) {
     $("autoRankNext").textContent =
-      `今日（${d.today}）任务已结束，等待明日北京时间 0 点自动开始。` + store;
+      `今日（${d.today}）任务已结束，等待明日北京时间 0 点自动开始。` + store
+      + anchorText;
   } else {
     const left = d.seconds_to_tick != null ? `（${fmtLeft(d.seconds_to_tick)}后）` : "";
     $("autoRankNext").textContent =
       `今日 ${d.today} · ${d.running ? "正在执行本轮" : "等待下一轮"}` +
       ` · 常规榜下次校准：${d.next_tick_text || "即将开始"}${left}` +
-      ` · ${d.sprint_active ? "★ 冲刺窗口内，每 2 分钟复查" : "未到冲刺窗口"}` + store;
+      ` · ${d.sprint_active ? "★ 冲刺窗口内，每 2 分钟复查" : "未到冲刺窗口"}` + store
+      + anchorText;
   }
 
   const tb = $("autoRankTable").querySelector("tbody");

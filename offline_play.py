@@ -1564,7 +1564,9 @@ def save_account(acc, make_current=True, source=None):
     doc = _load_account_doc()
     rec = dict(doc["accounts"].get(str(uid)) or {})
     for k in ("uid", "userName", "passwd", "nickName", "playerLevel",
-              "sid", "servertime", "status", "fingerprint"):
+              "sid", "servertime", "status", "fingerprint",
+              # role：固定号（坐榜号）标记，见 web/auto_rank.py::is_anchor
+              "role"):
         if acc.get(k) is not None:
             rec[k] = acc[k]
     now = now_bj_str()          # 统一北京时间，服务器在 UTC 也不会错位
