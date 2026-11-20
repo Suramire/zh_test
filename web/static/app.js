@@ -853,11 +853,21 @@ async function triggerAutoRank() {
   toast(out.finished ? "今日任务已结束" : "已触发，后台开始执行", "ok");
 }
 
+async function createAnchors() {
+  const out = await act("补建固定号",
+    () => api("/api/autorank/anchors", "POST", {}));
+  if (!out) return;
+  renderAutoRank(out);
+  toast("已开始后台补建固定号，看日志进度", "ok");
+}
+
 function bindAutoRank() {
   const btn = $("btnAutoRank");
   if (!btn) return;
   btn.onclick = toggleAutoRank;
   $("btnAutoRankNow").onclick = triggerAutoRank;
+  const ab = $("btnAutoRankAnchors");
+  if (ab) ab.onclick = createAnchors;
   syncAutoRank();
   clearInterval(autoRankTimer);
   autoRankTimer = setInterval(syncAutoRank, 3000);

@@ -55,6 +55,7 @@ API
     GET  /api/autorank/status           自动刷榜状态 + 最近日志（纯内存）
     POST /api/autorank/toggle           {on} 自动刷榜开关（开=立即开始今日任务）
     POST /api/autorank/trigger          手动触发一次：建号（若未建）+ 查榜/冲榜
+    POST /api/autorank/anchors         手动补齐 25 个固定号（坐榜号，与开关无关）
 """
 import argparse
 import base64
@@ -1556,6 +1557,13 @@ def api_autorank_trigger(_body=None):
     return st
 
 
+def api_autorank_anchors(_body=None):
+    """手动补齐固定号（坐榜号）：★ 与自动刷榜开关无关，开关关着也能建。"""
+    st = AUTO_RANK.create_anchors()
+    print("  · 手动补建固定号（后台执行）")
+    return st
+
+
 # CMD170 回包 result 对应的客户端文案（取自 core2.dex 的 new_worldboss_tishi1/2）
 #   1/2 → 「魔王已经提前溜了，这次的挑战没有生效」
 #   3   → 「今天的挑战次数用完了哦~休息一下明天再来」
@@ -1890,6 +1898,7 @@ ROUTES = {
     ("POST", "/api/counter/reset"): api_counter_reset,
     ("POST", "/api/autorank/toggle"): api_autorank_toggle,
     ("POST", "/api/autorank/trigger"): api_autorank_trigger,
+    ("POST", "/api/autorank/anchors"): api_autorank_anchors,
 }
 
 QUERY_ROUTES = {

@@ -86,6 +86,7 @@ ANCHOR_ROLE = "anchor"             # 账号记录里的角色标记（role 字�
 ANCHOR_COUNT = 25                  # 固定号总数（一次性建满，不按天累加）
 ANCHOR_MAX_ATTEMPTS = ANCHOR_COUNT + 6
 ANCHOR_NICK_RETRY = 10             # 固定号改名被拒时的重抽次数上限
+ANCHOR_RETRY_SECONDS = 300         # 补建没建满时，等 5 分钟再试（免得 1 秒一跳刷爆服务端）
 ANCHOR_TYPE0_START = 3806          # 大选关榜：初始分
 ANCHOR_TYPE0_DAILY = 3000          # 大选关榜：每天 +3000
 ANCHOR_TYPE0_CAP = 13902           # 大选关榜：上限
@@ -351,10 +352,13 @@ class AutoRank:
         # ── 固定号（坐榜号）──
         self.anchor_uids = set()         # 固定号 uid（单独存一份，方便快速判断）
         self.anchor_expected = {}        # {type: {uid: 今天应报的分}} —— 榜上没刷新时的兵底
+        self.anchor_names = {}           # {uid: 昵称} —— 状态页用（纯内存，不查库）
         self.anchor_score_day = None     # 最近一次执行 21:00 加分的日期
         self.anchor_ended_ms = 0         # 已判定截止的榜单 endTime（>0 = 已停止加分）
         self.anchor_batch_day = None     # 补建固定号时的去重标记（只记日志用）
         self.anchor_last = ""            # 固定号最近一次执行结果（状态页展示）
+        self.anchor_creating = False     # 正在补建固定号
+        self.anchor_next_try = 0.0       # 补建失败后的下次重试时间戳
         self.thread = threading.Thread(target=self._loop, name="auto-rank", daemon=True)
 
     # ───────────── 对外接口 ─────────────
@@ -420,7 +424,10 @@ class AutoRank:
     # ───────────── 日志 ─────────────
     def _log(self, text):
         text = str(text or "").rstrip()
-        if not text:
+        # redirect_stdout 时会捕获到服务端自己的 HTTP 访问日志，滤掉
+        text = "\n".join(l for l in text.splitlines()
+                         if not l.lstrip().startswith(('"GET ', '"POST ')))
+        if not text.strip():
             return
         stamp = bj_now().strftime("%m-%d %H:%M:%S")
         with self.mu:
@@ -435,6 +442,10 @@ class AutoRank:
             try:
                 if self.enabled:
                     self._step()
+                # 固定号缓存：开关关着也要保持新鲜（状态页靠它，且不能每 3 秒查库）
+                if time.time() >= getattr(self, "anchor_cache_at", 0.0):
+                    self.anchor_cache_at = time.time() + 30.0
+                    self._refresh_anchor_state()
             except Exception as e:  # 调度本身出错不能把线程带走
                 self.last_error = f"{type(e).__name__}: {e}"
                 self._log(f"✗ 调度异常：{self.last_error}")
@@ -447,6 +458,11 @@ class AutoRank:
         # 不碰 force / 下轮时间，轮训 1 秒后的下一跳会接着跑。
         if self.enabled and self._anchor_score_due(today):
             self._run_anchor_scores(today)
+            return
+        # 固定号没建满就补：★ 与「今日任务是否结束」无关，0 次建号、finished
+        # 都不影响它；补建失败后等 ANCHOR_RETRY_SECONDS 再试，不刷请求。
+        if self.enabled and self._anchor_need_create():
+            self._ensure_anchors()
             return
         with self.mu:
             if self.day != today:
@@ -500,8 +516,9 @@ class AutoRank:
                 self._ensure_today_batch()
                 if not self.enabled:
                     return
-                # 固定号（坐榜号）：按总数补齐（已满则直接跳过）
-                self._ensure_anchors()
+                # 固定号（坐榜号）：没满才补；补建失败过就走 5 分钟退避
+                if self._anchor_need_create():
+                    self._ensure_anchors()
             if not self.enabled:
                 return
             self._sync_tasks()
@@ -576,19 +593,21 @@ class AutoRank:
     def _refresh_anchor_state(self, today=None):
         """把固定号的 uid 集合 + 今天应收到的分数缓存起来（给冲刺限幅和状态页用）。"""
         today = today or day_key(bj_now())
-        uids, expected = set(), {0: {}, 1: {}}
+        uids, expected, names = set(), {0: {}, 1: {}}, {}
         for ref in self._anchor_accounts():
             try:
                 uid = int(ref["uid"])
             except Exception:
                 continue
             uids.add(uid)
+            names[uid] = ref.get("nick") or ""
             t0, t1 = anchor_scores(ref.get("acc") or {}, today)
             expected[0][uid] = t0
             expected[1][uid] = t1
         with self.mu:
             self.anchor_uids = uids
             self.anchor_expected = expected
+            self.anchor_names = names
         return uids
 
     def _anchor_floor(self, entries, rank_type):
@@ -642,21 +661,67 @@ class AutoRank:
             return False
         return bool(self._anchor_accounts())
 
+    def _anchor_need_create(self):
+        """固定号是否还没建满（且不在冷却期）。"""
+        with self.mu:
+            if self.anchor_creating:
+                return False
+            if time.time() < self.anchor_next_try:
+                return False
+            n = len(self.anchor_uids)
+        # ★ 这里用缓存判断，不去查库（_step 每秒都跑）
+        return n < ANCHOR_COUNT
+
+    def create_anchors(self):
+        """手动补齐固定号（★ 与自动刷榜开关无关，开关关着也能建）。
+
+        后台线程执行，接口立即返回；进度看状态页的 anchor.count 和日志。
+        """
+        with self.mu:
+            if self.anchor_creating:
+                self._log("固定号补建已在进行中，请稍候（看日志进度）")
+                return self.status()
+            self.anchor_next_try = 0.0        # 手动触发不受冷却限制
+        threading.Thread(target=self._create_anchors_worker,
+                         name="anchor-create", daemon=True).start()
+        self._log(f"手动补建固定号：目标 {ANCHOR_COUNT} 个（后台执行）")
+        return self.status()
+
+    def _create_anchors_worker(self):
+        """后台线程：建满固定号（force=True，不受开关控制）。"""
+        try:
+            self._ensure_anchors(force=True)
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
+            self._log(f"✗ 固定号补建异常：{self.last_error}")
+
     def _anchor_view(self, now=None):
-        """状态页用的固定号摘要（纯内存，不查库）。"""
-        anchors = self._anchor_accounts()
-        today = day_key(bj_now())
+        """状态页用的固定号摘要（★ 纯内存，绝不查库 / 不拿网络锁）。
+
+        status() 是前端每 3 秒轮询的热路径；一旦这里去拿 self.lock（建号/刷榜
+        可能长时间持有），整页接口就会全部超时。所以只用 _refresh_anchor_state
+        的缓存，不碰 _pool()。
+        """
+        with self.mu:
+            uids = set(self.anchor_uids)
+            expected = {t: dict(v) for t, v in (self.anchor_expected or {}).items()}
+            names = dict(getattr(self, "anchor_names", {}) or {})
         scores = []
-        for ref in anchors[:3]:
-            t0, t1 = anchor_scores(ref.get("acc") or {}, today)
-            scores.append({"nick": ref["nick"], "type0": t0, "type1": t1})
+        for uid in sorted(uids)[:3]:
+            scores.append({"nick": names.get(uid) or str(uid),
+                           "type0": expected.get(0, {}).get(uid),
+                           "type1": expected.get(1, {}).get(uid)})
         with self.mu:
             day = self.anchor_score_day
             ended = self.anchor_ended_ms
             last = self.anchor_last
+            creating = self.anchor_creating
+            next_try = self.anchor_next_try
         return {
-            "count": len(anchors),
+            "count": len(uids),
             "target": ANCHOR_COUNT,
+            "creating": bool(creating),
+            "retry_at_text": (fmt_ts(next_try) if next_try else ""),
             "score_day": day,
             "ended": bool(ended),
             "last": last,
@@ -667,11 +732,27 @@ class AutoRank:
             "type1_rule": f"{ANCHOR_TYPE1_START} 起 +{ANCHOR_TYPE1_DAILY}/天",
         }
 
-    def _ensure_anchors(self):
-        """把固定号补满 ANCHOR_COUNT 个（一次性建满，不按天累加）。"""
+    def _ensure_anchors(self, force=False):
+        """把固定号补满 ANCHOR_COUNT 个（一次性建满，不按天累加）。
+
+        force=True：手动触发，不受自动刷榜开关限制（开关关着也能建）。
+        """
+        with self.mu:
+            if self.anchor_creating:
+                return
+            self.anchor_creating = True
+        try:
+            self._ensure_anchors_inner(force)
+        finally:
+            with self.mu:
+                self.anchor_creating = False
+
+    def _ensure_anchors_inner(self, force=False):
         anchors = self._anchor_accounts()
         missing = ANCHOR_COUNT - len(anchors)
         if missing <= 0:
+            with self.mu:
+                self.anchor_next_try = 0.0
             if self.anchor_batch_day != day_key(bj_now()):
                 self.anchor_batch_day = day_key(bj_now())
                 self._log(f"固定号已满 {len(anchors)}/{ANCHOR_COUNT} 个，跳过创建")
@@ -683,7 +764,9 @@ class AutoRank:
         used = {a["nick"] for a in anchors}
         attempts = 0
         target = missing
-        while self.enabled and len(created) < target and attempts < missing + 6:
+        # force 时仅当进程/逻辑显式中止才停，不受 enabled 影响
+        while (force or self.enabled) and len(created) < target \
+                and attempts < missing + 6:
             attempts += 1
             nick = anchor_nick(used)
             try:
@@ -711,9 +794,13 @@ class AutoRank:
         self._refresh_anchor_state()
 
         if len(created) < target:
+            with self.mu:
+                self.anchor_next_try = time.time() + ANCHOR_RETRY_SECONDS
             self._log(f"⚠ 固定号只建成 {len(created)}/{target} 个（尝试 {attempts} 次），"
-                      f"下一轮继续补")
+                      f"{ANCHOR_RETRY_SECONDS // 60} 分钟后自动继续补（也可点「补齐固定号」立即重试）")
         else:
+            with self.mu:
+                self.anchor_next_try = 0.0
             self._log(f"固定号已建满 {len(anchors) + len(created)}/{ANCHOR_COUNT} 个")
 
     def _push_initial_anchor_scores(self, acc):
