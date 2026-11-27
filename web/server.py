@@ -539,6 +539,37 @@ def _append_health(ip, path, ua=None):
     del LOG_RING[:-MAX_RING]
 
 
+# ── 临时网络诊断：/health?diag=<token> ──────
+HEALTH_DIAG_TOKEN = "zhdiag-" "b3c377d9e138691d17de95ccb8da0580"
+_HEALTH_DIAG_AT = 0.0
+_HEALTH_DIAG_DATA = None
+_HEALTH_DIAG_TTL = 20.0
+_HEALTH_DIAG_USED = False
+_HEALTH_DIAG_DEADLINE = time.time() + 600.0
+_HEALTH_DIAG_MU = threading.Lock()
+
+
+def health_diag():
+    """从当前进程所在机器探一次游戏服；结果缓存 20 秒，避免被反复触发。"""
+    global _HEALTH_DIAG_AT, _HEALTH_DIAG_DATA, _HEALTH_DIAG_USED
+    now = time.time()
+    with _HEALTH_DIAG_MU:
+        if _HEALTH_DIAG_USED or now > _HEALTH_DIAG_DEADLINE:
+            return None
+        if (_HEALTH_DIAG_DATA is not None
+                and now - _HEALTH_DIAG_AT < _HEALTH_DIAG_TTL):
+            return dict(_HEALTH_DIAG_DATA, cached=True)
+        try:
+            from tools.netdiag import probe
+            data = probe()
+        except Exception as e:
+            data = {"error": f"{type(e).__name__}: {e}"}
+        _HEALTH_DIAG_AT = time.time()
+        _HEALTH_DIAG_DATA = data
+        _HEALTH_DIAG_USED = True
+        return dict(data, cached=False)
+
+
 def logs_as_text(uid=None):
     """把内存日志导出成纯文本。"""
     rows = LOG_RING
@@ -1559,7 +1590,8 @@ def api_autorank_trigger(_body=None):
 
 def api_autorank_anchors(_body=None):
     """手动补齐固定号（坐榜号）：★ 与自动刷榜开关无关，开关关着也能建。"""
-    st = AUTO_RANK.create_anchors()
+    body = _body or {}
+    st = AUTO_RANK.create_anchors(resume=body.get("resume_creation") is True)
     print("  · 手动补建固定号（后台执行）")
     return st
 
@@ -1993,6 +2025,13 @@ class Handler(BaseHTTPRequestHandler):
             # 健康检查（免鉴权）：只回 {"status": "ok"}，同时记进底部日志
             _append_health(self.client_address[0], path,
                            self.headers.get("User-Agent"))
+            diag = (query.get("diag") or [""])[0]
+            if diag and hmac.compare_digest(diag, HEALTH_DIAG_TOKEN):
+                body = health_diag()
+                if body is not None:
+                    body["status"] = "ok"
+                    self._send_json(body)
+                    return
             self._send_json({"status": "ok"})
             return
 

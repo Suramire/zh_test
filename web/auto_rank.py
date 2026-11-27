@@ -359,6 +359,9 @@ class AutoRank:
         self.anchor_last = ""            # 固定号最近一次执行结果（状态页展示）
         self.anchor_creating = False     # 正在补建固定号
         self.anchor_next_try = 0.0       # 补建失败后的下次重试时间戳
+        self.creation_rejections = 0
+        self.creation_paused = False
+        self.creation_cancel = threading.Event()
         self.thread = threading.Thread(target=self._loop, name="auto-rank", daemon=True)
 
     # ───────────── 对外接口 ─────────────
@@ -373,6 +376,8 @@ class AutoRank:
             tasks = list(self.tasks)
             return {
                 "enabled": self.enabled,
+                "creation_paused": self.creation_paused,
+                "creation_rejections": self.creation_rejections,
                 "running": self.running,
                 "finished": self.finished,
                 "today": day_key(bj_now()),
@@ -398,6 +403,8 @@ class AutoRank:
     def set_enabled(self, on):
         on = bool(on)
         with self.mu:
+            if not on:
+                self.creation_cancel.set()
             if on == self.enabled:
                 return self.status()
             self.enabled = on
@@ -664,7 +671,7 @@ class AutoRank:
     def _anchor_need_create(self):
         """固定号是否还没建满（且不在冷却期）。"""
         with self.mu:
-            if self.anchor_creating:
+            if self.anchor_creating or self.creation_paused:
                 return False
             if time.time() < self.anchor_next_try:
                 return False
@@ -672,7 +679,7 @@ class AutoRank:
         # ★ 这里用缓存判断，不去查库（_step 每秒都跑）
         return n < ANCHOR_COUNT
 
-    def create_anchors(self):
+    def create_anchors(self, resume=False):
         """手动补齐固定号（★ 与自动刷榜开关无关，开关关着也能建）。
 
         后台线程执行，接口立即返回；进度看状态页的 anchor.count 和日志。
@@ -681,6 +688,13 @@ class AutoRank:
             if self.anchor_creating:
                 self._log("固定号补建已在进行中，请稍候（看日志进度）")
                 return self.status()
+            if self.creation_paused:
+                if not resume:
+                    self._log("补建已熔断：请核查服务端拒绝原因，确认解除后显式恢复")
+                    return self.status()
+                self.creation_paused = False
+                self.creation_rejections = 2
+                self._log("人工恢复补建：再次收到明确拒绝将立即暂停")
             self.anchor_next_try = 0.0        # 手动触发不受冷却限制
         threading.Thread(target=self._create_anchors_worker,
                          name="anchor-create", daemon=True).start()
@@ -721,6 +735,7 @@ class AutoRank:
             "count": len(uids),
             "target": ANCHOR_COUNT,
             "creating": bool(creating),
+            "creation_paused": self.creation_paused,
             "retry_at_text": (fmt_ts(next_try) if next_try else ""),
             "score_day": day,
             "ended": bool(ended),
@@ -738,9 +753,10 @@ class AutoRank:
         force=True：手动触发，不受自动刷榜开关限制（开关关着也能建）。
         """
         with self.mu:
-            if self.anchor_creating:
+            if self.anchor_creating or self.creation_paused:
                 return
             self.anchor_creating = True
+            self.creation_cancel.clear()
         try:
             self._ensure_anchors_inner(force)
         finally:
@@ -766,7 +782,8 @@ class AutoRank:
         target = missing
         # force 时仅当进程/逻辑显式中止才停，不受 enabled 影响
         while (force or self.enabled) and len(created) < target \
-                and attempts < missing + 6:
+                and attempts < missing + 6 and not self.creation_paused \
+                and not self.creation_cancel.is_set():
             attempts += 1
             nick = anchor_nick(used)
             try:
@@ -792,6 +809,13 @@ class AutoRank:
             time.sleep(0.5)
 
         self._refresh_anchor_state()
+
+        if self.creation_paused or self.creation_cancel.is_set():
+            with self.mu:
+                self.anchor_next_try = 0.0
+            self._log("固定号补建已暂停，不安排自动重试"
+                      if self.creation_paused else "固定号补建已取消")
+            return
 
         if len(created) < target:
             with self.mu:
@@ -968,7 +992,8 @@ class AutoRank:
         created = []
         failed = set()          # 建号失败的名字，别在下一轮又抽到同一个
         attempts = 0
-        while self.enabled and len(created) < BATCH_SIZE and attempts < MAX_CREATE_ATTEMPTS:
+        while self.enabled and not self.creation_paused \
+                and len(created) < BATCH_SIZE and attempts < MAX_CREATE_ATTEMPTS:
             attempts += 1
             used = {str(a.get("nick") or "") for a in created} | failed
             index = next((i for i in range(1, BATCH_SIZE + 1)
@@ -1003,15 +1028,27 @@ class AutoRank:
         retry_limit = ANCHOR_NICK_RETRY if nick_factory else NICK_RETRY_LIMIT
         try:
             with self.lock, redirect_stdout(buf), redirect_stderr(buf):
-                acc = m.register()
+                with self.mu:
+                    if self.creation_paused:
+                        raise RuntimeError("自动建号已暂停：连续收到服务端明确拒绝")
                 try:
+                    acc = m.register()
                     lg = m.login(acc["userName"], acc["passwd"],
                                  acc.get("nickName") or acc["userName"],
                                  fingerprint=acc.get("fingerprint"))
                 except Exception as e:
-                    if is_banned_error(e):
-                        self._drop_banned(acc, e)
+                    if is_banned_error(e) or "注册被拒" in str(e):
+                        with self.mu:
+                            self.creation_rejections += 1
+                            if self.creation_rejections >= 3:
+                                self.creation_paused = True
+                                self.anchor_next_try = 0.0
+                                self._log("连续 3 次建号被拒，已熔断所有自动补建；"
+                                          "请核查原因后显式恢复，不再每 5 分钟重试")
+                        self._log("新号注册/首次登录被拒，尚未入库，无需删库")
                     raise
+                with self.mu:
+                    self.creation_rejections = 0
                 acc.update({"sid": int(lg["sid"]),
                             "servertime": lg.get("servertime", 0)})
                 if lg.get("otherName"):

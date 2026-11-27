@@ -776,21 +776,31 @@ function renderAutoRank(d) {
         : ` · 每日 21:00 加分（下次 ${an.next_at_text || "-"}）` +
           (an.score_day && an.score_day === d.today ? "，今日已执行" : ""))
     : "";
+  const breakerText = d.creation_paused
+    ? " · ⚠ 建号已熔断：连续被服务端拒绝，所有自动补建已停；" +
+      "确认原因后点「解除熔断并补齐固定号」"
+    : "";
+  const anchorBtn = $("btnAutoRankAnchors");
+  if (anchorBtn) {
+    anchorBtn.textContent = d.creation_paused
+      ? "解除熔断并补齐固定号"
+      : "补齐固定号（25 个）";
+  }
   if (!d.enabled) {
     $("autoRankNext").textContent =
       "开关关闭。点「启动自动刷榜」立即开始今日任务；开关打开后每天北京时间 0 点自动触发。"
-      + store + anchorText;
+      + store + anchorText + breakerText;
   } else if (d.finished) {
     $("autoRankNext").textContent =
       `今日（${d.today}）任务已结束，等待明日北京时间 0 点自动开始。` + store
-      + anchorText;
+      + anchorText + breakerText;
   } else {
     const left = d.seconds_to_tick != null ? `（${fmtLeft(d.seconds_to_tick)}后）` : "";
     $("autoRankNext").textContent =
       `今日 ${d.today} · ${d.running ? "正在执行本轮" : "等待下一轮"}` +
       ` · 常规榜下次校准：${d.next_tick_text || "即将开始"}${left}` +
       ` · ${d.sprint_active ? "★ 冲刺窗口内，每 2 分钟复查" : "未到冲刺窗口"}` + store
-      + anchorText;
+      + anchorText + breakerText;
   }
 
   const tb = $("autoRankTable").querySelector("tbody");
@@ -854,11 +864,23 @@ async function triggerAutoRank() {
 }
 
 async function createAnchors() {
-  const out = await act("补建固定号",
-    () => api("/api/autorank/anchors", "POST", {}));
+  const paused = !!autoRankState.creation_paused;
+  if (paused && !confirm(
+    "建号已熔断：连续 3 次被服务端拒绝（常见为指纹/机型被拉黑，或出口网络不通）。\n" +
+    "请先看运行日志核实原因。确认已排查并要恢复自动补建吗？")) return;
+  const label = paused ? "解除熔断并补建固定号" : "补建固定号";
+  const out = await act(label,
+    () => api("/api/autorank/anchors", "POST",
+      paused ? { resume_creation: true } : {}));
   if (!out) return;
   renderAutoRank(out);
-  toast("已开始后台补建固定号，看日志进度", "ok");
+  if (out.creation_paused) {
+    toast("建号仍处于熔断状态：本轮再次被拒，已停止自动补建", "bad");
+  } else if (paused) {
+    toast("已解除熔断，后台开始补建固定号", "ok");
+  } else {
+    toast("已开始后台补建固定号，看日志进度", "ok");
+  }
 }
 
 function bindAutoRank() {
